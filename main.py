@@ -3,7 +3,7 @@ from swarm import Swarm
 from variable import Variables
 from swarm_tasks.network.UDP import UDPReceiver, CallBack
 from vehicle import Vehicles
-from utils import current_process,generate_heights
+from utils import current_process, generate_heights
 from swarm_tasks.config_server import ConfigServer
 from swarm_tasks.network.network import NetworkIP
 
@@ -17,9 +17,13 @@ if __name__ == "__main__":
             f"udpin:{ip}:14551",
             f"udpin:{ip}:14552",
             f"udpin:{ip}:14553",
-            # f"udpin:{ip}:14554",
-            # f"udpin:{ip}:14555",
-            # f"udpin:{ip}:14556",
+            f"udpin:{ip}:14554",
+            f"udpin:{ip}:14555",
+            f"udpin:{ip}:14556",
+            f"udpin:{ip}:14557",
+            f"udpin:{ip}:14558",
+            f"udpin:{ip}:14559",
+            f"udpin:{ip}:14560",
         ]
     )
     receiver = UDPReceiver((ip, 12008), callback=callBack.call_back)
@@ -119,15 +123,17 @@ if __name__ == "__main__":
                 center_lat_lon_array, uav_array, grid_space, coverage_area
             )
             callBack.set_data()
-            
+
         elif data.startswith("different"):
             msg_parts = data.split(",")
             start = int(msg_parts[1])
             diff = int(msg_parts[2])
-            variables.heights = generate_heights(start_height=start,num_drones=len(vehicles.drones),difference=diff)
+            variables.heights = generate_heights(
+                start_height=start, num_drones=len(vehicles.drones), difference=diff
+            )
             print(variables.heights)
             callBack.set_data()
-            
+
         else:
             print(f"in else data: {data}")
             # sys.exit()
