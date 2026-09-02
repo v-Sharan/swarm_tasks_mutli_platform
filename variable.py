@@ -75,7 +75,7 @@ class Variables:
         # the formation is bot-in-front / drone-behind again instead
         # of drifting further apart with no correction.
         self.sync_lead_distance_sim = 100.0
-
+        self.gui = True
         # Anything saved from a previous run (e.g. edited through the
         # config-server web panel) overrides the defaults set above.
         self.load()

@@ -142,6 +142,7 @@ class Swarm:
         may already be closed, so reusing one across functions leaves
         the previous run's elements on the new axes -- rebuild instead.
         """
+        if not self.Variables.gui: return
         if self.gui is not None:
             self.gui.close()
         self.gui = viz.Gui(self.s)
@@ -391,6 +392,7 @@ class Swarm:
 
     def gui_tick(self):
         """Call repeatedly from the main thread to drive the plot."""
+        if not self.Variables.gui: return
         if self.gui is None:
             return
         if self._gui_close_requested:

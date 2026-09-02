@@ -7,7 +7,7 @@ from matplotlib import animation
 import numpy as np
 from shapely.geometry import Point
 class Gui:
-	def __init__(self, sim):
+	def __init__(self, sim,isGui=False):
 		self.sim = sim
 		self.size = sim.size
 		self.env_name = sim.env_name
@@ -37,9 +37,10 @@ class Gui:
 		self.gps_artists = []
 		self.lookahead_artists = []
 		self.bot_artists = []  # bot circles + heading arrows drawn by show_bots()
-
+		self.isGui = False
+  
 	def show_bots(self):
-
+		if not self.isGui: return
 		# bot.size is the real collision radius used by the simulation logic
 		# (often as small as 0.4) -- on a world sized in real ground units
 		# (e.g. a fence loaded from swarm_env can be thousands of units wide)
@@ -83,6 +84,7 @@ class Gui:
 		list across frames (only overwriting entries as new goals are
 		computed) rather than rebuilding it each frame, so a bot with no
 		goal yet (None) simply has no marker instead of flickering."""
+		if not self.isGui: return
 		for artist in self.goal_artists:
 			artist.remove()
 		self.goal_artists = []
@@ -116,6 +118,7 @@ class Gui:
 		is a different artist class, so it survives that sweep and is
 		cleaned up by this method's own gps_artists tracking instead.
 		"""
+		if not self.isGui: return
 		for artist in self.gps_artists:
 			artist.remove()
 		self.gps_artists = []
@@ -153,6 +156,7 @@ class Gui:
 		computed this tick. Current target only -- no trail, redrawn fresh
 		every call, same pattern as show_gps_positions.
 		"""
+		if not self.isGui: return
 		for artist in self.lookahead_artists:
 			artist.remove()
 		self.lookahead_artists = []
@@ -171,6 +175,7 @@ class Gui:
 			self.lookahead_artists.append(marker)
 
 	def show_env(self):
+		if not self.isGui: return
 		for obs in self.sim.env.obstacles:
 			x, y = obs.exterior.xy
 			self.ax.fill(x, y, fc='gray', alpha=0.9)
@@ -215,6 +220,7 @@ class Gui:
 	'''
 
 	def show_contents(self):
+		if not self.isGui: return
 		for item in self.sim.contents.items:
 			x,y = item.polygon.exterior.xy
 			if item.subtype == 'contamination':
@@ -231,6 +237,7 @@ class Gui:
 		"""
 
 		"""
+		if not self.isGui: return
 		self.remove_artists()
 		#self.show_bots()
 		if self.sim.has_item_moved:
@@ -256,6 +263,7 @@ class Gui:
 		call -- direct removal from the list we already built is O(num
 		bots) instead of O(everything on the axes), every single frame.
 		"""
+		if not self.isGui: return
 		for obj in self.bot_artists:
 			obj.remove()
 		self.bot_artists = []
@@ -267,6 +275,7 @@ class Gui:
 
 	def show_neighbourhood(self, bot, r=None):
 		#Shows the neighbourhood of a robot
+		if not self.isGui: return
 		x,y = bot.get_position()
 		if r == None:
 			r = bot.neighbourhood_radius
@@ -285,6 +294,7 @@ class Gui:
 		Plotting the grid as an image takes high computation
 		Plot in another format
 		"""
+		if not self.isGui: return
 		if self.grid_scatter != None:
 			self.grid_scatter.remove()
 
@@ -306,6 +316,7 @@ class Gui:
 		#plt.draw()
 
 	def show_coverage(self, area_covered,search_time):
+		if not self.isGui: return
 		self.area_covered=area_covered
 		self.search_time=search_time
 		#self.elapsed_time_value = elapsed_time
@@ -330,9 +341,11 @@ class Gui:
         
 		return area_covered
 	def run(self):
+		if not self.isGui: return
 		plt.show(block=False)
 		
 	def close(self):
+		if not self.isGui: return
 		#Close THIS Gui's figure specifically: bare plt.close() closes
 		#whichever figure happens to be current, which may belong to
 		#something else entirely once more than one has been created.
