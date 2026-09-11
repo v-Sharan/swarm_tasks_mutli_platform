@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from variable import _coerce
 
 # Read once at Simulation construction -- a runtime edit is inert.
-RESTART_REQUIRED = {"world_size", "speed", "bank_angle_deg"}
+RESTART_REQUIRED = {"world_size", "speed", "bank_angle_deg", "terrain_use_dat"}
 
 # Defined on Variables but read by no code -- editing does nothing at all.
 # Better to say so on the page than to let a knob look live when it isn't.
@@ -49,6 +49,17 @@ NOTES = {
     "debug_reposition": "print commanded vs actual position every 2s per bot",
     "endDistance": "geoToCart/cartToGeo scale -- other fields depend on it",
     "sync_lead_distance_sim": "how far the bot leads the drone after a resync",
+    "terrain_warn": "enable the terrain-clearance watchdog (console + UDP warnings)",
+    "terrain_clearance_m": "warn when ground rises within this many metres of "
+    "the drone's AMSL altitude",
+    "terrain_lookahead_m": "how far ahead of the drone to sample terrain, metres",
+    "terrain_sample_step_m": "spacing between terrain samples along the path ahead, metres",
+    "terrain_warn_host": "UDP host the terrain_warning JSON packets are sent to",
+    "terrain_warn_port": "UDP port for the terrain_warning packets",
+    "terrain_use_dat": "consult the ArduPilot .DAT terrain tiles in DAT/ "
+    "(elevation_dat) alongside SRTM .hgt -- restart to take effect",
+    "terrain_prefer_dat": "try .DAT first and fall back to .hgt "
+    "(off = .hgt first, .DAT fallback)",
 }
 
 

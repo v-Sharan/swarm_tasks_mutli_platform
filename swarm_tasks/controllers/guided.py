@@ -1,4 +1,6 @@
 import numpy as np
+from shapely.geometry import Point, LineString
+from shapely.ops import nearest_points, unary_union
 from swarm_tasks.controllers.command import Cmd
 from swarm_tasks.controllers import bezier
 from swarm_tasks.controllers import potential_field
@@ -70,13 +72,19 @@ def _avoidance_offset(
        collide", not for "always keep 15m clear".
 
     2. min_sep is a number (metres): a linear "keep-out zone" push
-       instead. For each nearby bot within min_sep, the push magnitude is
-       avoid_weight * (min_sep - actual_distance) -- i.e. it's exactly
-       zero right at min_sep and grows linearly as the gap closes further,
-       the same shape as a spring being compressed. This directly targets
-       a *specific* standoff distance rather than relying on how fast an
-       inverse-square field happens to decay, so "keep at least 15m away"
-       means what it says.
+       instead. For each nearby bot OR obstacle within min_sep, the push
+       magnitude is avoid_weight * (min_sep - actual_distance) -- i.e.
+       it's exactly zero right at min_sep and grows linearly as the gap
+       closes further, the same shape as a spring being compressed. This
+       directly targets a *specific* standoff distance rather than
+       relying on how fast an inverse-square field happens to decay, so
+       "keep at least 15m away" means what it says. Obstacle distance is
+       measured to the nearest point on the polygon's EDGE (its
+       .exterior ring, not the filled shape potential_field.get_field()'s
+       obstacle loop uses) so a bot that has already penetrated one still
+       gets a real nearest point and a push back out through that edge,
+       rather than the zero-distance/no-direction result a filled-shape
+       lookup would give for a point already inside it.
 
     Either way, why this can't just be handed to move() as a raw velocity
     command: right next to another bot the push can still be large,
@@ -117,6 +125,34 @@ def _avoidance_offset(
             penetration = min_sep - d  # 0 right at min_sep, grows as they close further
             direction = np.array([bx - other.x, by - other.y]) / d
             vec += avoid_weight * penetration * direction
+
+        # Same linear keep-out law, against each obstacle polygon's
+        # nearest EDGE point instead of another bot's centre. Distance
+        # and nearest point are measured against o.exterior (the
+        # boundary ring), not o itself: a shapely Polygon is a filled
+        # area, so nearest_points(p, o) for a p already INSIDE o just
+        # returns p twice (distance 0, no usable direction) -- measuring
+        # against the ring instead always finds a real nearest edge
+        # point, whether the bot is outside it (the common case) or has
+        # already penetrated it.
+        #
+        # p1-p2 (edge point subtracted from bot) points away from the
+        # wall on the OUTSIDE (bot's own side of that edge) -- correct
+        # "push clear" direction there. From INSIDE, that same
+        # subtraction points from the edge back towards the interior --
+        # exactly backwards, since escaping means continuing on THROUGH
+        # that nearest edge, not retreating deeper in -- so the sign is
+        # flipped whenever the bot is actually inside.
+        p = Point(bx, by)
+        for o in bot.sim.env.obstacles:
+            p1, p2 = nearest_points(p, o.exterior)
+            d = p1.distance(p2)
+            if d >= min_sep or d < 1e-6:
+                continue
+            penetration = min_sep - d
+            sign = -1.0 if o.contains(p) else 1.0
+            direction = sign * np.array([p1.x - p2.x, p1.y - p2.y]) / d
+            vec += avoid_weight * penetration * direction
     else:
         field_cmd = potential_field.get_field(
             bot.get_position(),
@@ -146,6 +182,77 @@ def _avoidance_offset(
     if mag > max_offset:
         vec = vec * (max_offset / mag)
     return vec
+
+
+def _detour_point(bot, target, margin):
+    """
+    If the straight segment from the bot's CURRENT position to `target`
+    passes within `margin` of any obstacle, returns a point beyond one of
+    that obstacle's edges to steer at INSTEAD of `target`, so the bot
+    actually routes around it. Returns None if the direct segment is
+    already clear (no detour needed) -- the common case, and free to
+    call every tick.
+
+    Why this exists, and why _avoidance_offset's push isn't enough by
+    itself: that push is magnitude-capped (max_offset -- see its
+    docstring), which only works when the offset budget comfortably
+    exceeds the obstacle's own extent along the escape direction. Fine
+    for another bot or a compact obstacle, but a long obstacle (a fence
+    wall spanning hundreds/thousands of metres, say) can exceed ANY
+    bounded local push -- the bot just gets shoved back toward the line
+    it's trying to hold, and off again, indefinitely, never actually
+    getting beyond the wall's end. Routing at an explicit point past the
+    obstacle's own edge has no such bound: it moves the GOAL being
+    tracked this tick, not just a capped nudge on top of the old one.
+
+    The detour point is whichever of the blocking obstacles' two
+    convex-hull corners "bracketing" the segment (one on each side, as
+    measured perpendicular to it) gives the shorter total path bot ->
+    corner -> target, pushed `margin` further out past that corner so
+    the detour point itself still clears the obstacle by the same
+    standoff _avoidance_offset enforces elsewhere. Recomputed fresh
+    every tick from the bot's current position, so as it makes progress
+    the choice of corner updates too, rather than committing to one plan
+    up front the way a full path planner would.
+
+    Every obstacle currently within `margin` of the segment is unioned
+    together before picking corners -- not just the nearest one -- so
+    two obstacles that meet or sit close together (e.g. adjacent fence
+    segments sharing a corner) are routed around as the one combined
+    shape they actually form. Handling only the nearest in isolation can
+    send the bot from one straight into the next: its "clear of A"
+    corner can sit well inside B, which starts blocking as soon as A
+    stops, and the two corners fight the same way plain _avoidance_offset
+    already does for a single too-large obstacle.
+    """
+    if bot.sim is None:
+        return None
+    pos = np.array(bot.get_position())
+    tgt = np.array(target, dtype=float)
+    line_vec = tgt - pos
+    line_len = np.linalg.norm(line_vec)
+    if line_len < 1e-6:
+        return None
+
+    seg = LineString([tuple(pos), tuple(tgt)])
+    blocking = [o for o in bot.sim.env.obstacles if seg.distance(o) < margin]
+    if not blocking:
+        return None
+    combined = unary_union(blocking)
+
+    line_dir = line_vec / line_len
+    normal = np.array([-line_dir[1], line_dir[0]])  # perpendicular to the segment
+
+    verts = np.array(combined.convex_hull.exterior.coords[:-1])
+    offsets = (verts - pos) @ normal
+    left_corner = verts[np.argmax(offsets)] + margin * normal
+    right_corner = verts[np.argmin(offsets)] - margin * normal
+
+    def detour_len(corner):
+        return np.linalg.norm(corner - pos) + np.linalg.norm(tgt - corner)
+
+    corner = left_corner if detour_len(left_corner) <= detour_len(right_corner) else right_corner
+    return float(corner[0]), float(corner[1])
 
 
 def line_waypoint_guidance(
@@ -307,7 +414,7 @@ def line_waypoint_guidance(
         bot.line_start = (bot.x, bot.y)
         bot.line_start_goal = bot.goal
 
-    target = _lookahead_point_on_line(bot, bot.line_start, bot.goal, lookahead)
+    line_start, line_end = bot.line_start, bot.goal
 
     if avoid_bots:
         r = avoid_radius if avoid_radius is not None else _default_avoid_radius(bot)
@@ -316,6 +423,21 @@ def line_waypoint_guidance(
         else:
             turn_r = bot.turn_radius()
             max_off = 2.0 * (turn_r if turn_r is not None else 20.0)
+
+        # If an obstacle blocks the direct path to the goal, track a
+        # fresh line from HERE to a point around it instead of the
+        # original leg -- see _detour_point()'s docstring for why the
+        # capped push below can't handle this alone. Only engages when
+        # something's actually in the way; otherwise line_end stays
+        # bot.goal and this is exactly what ran before detours existed.
+        margin = avoid_min_sep if avoid_min_sep is not None else r
+        detour = _detour_point(bot, bot.goal, margin)
+        if detour is not None:
+            line_start, line_end = (bot.x, bot.y), detour
+
+    target = _lookahead_point_on_line(bot, line_start, line_end, lookahead)
+
+    if avoid_bots:
         target = target + _avoidance_offset(
             bot, r, avoid_weight, max_off, min_sep=avoid_min_sep
         )

@@ -1,7 +1,9 @@
 from math import cos, sin, radians, degrees
 from yaml import safe_load  # type: ignore
-from os import path,makedirs
+from os import path, makedirs
 from pymavlink import mavutil
+from shapely.geometry import Polygon
+
 
 def compass_to_math_rad(heading_deg):
     """
@@ -93,6 +95,47 @@ def read_origin(
     return origin
 
 
+def read_size(
+    filepath=path.join(
+        path.expanduser("~"), "Documents", "swarm_env", "rectangles.yaml"
+    )
+):
+    with open(filepath) as f:
+        data = safe_load(f)
+    print(data)
+    size = data.get("size")
+    if isinstance(size, dict):
+        size = (size["x"], size["y"])
+    return size
+
+
+def read_obstacles(
+    filepath=path.join(
+        path.expanduser("~"), "Documents", "swarm_env", "rectangles.yaml"
+    )
+):
+    """Obstacle polygons from the same rectangles.yaml read_origin() reads
+    the origin from. Each entry under 'obstacles' is a list of [x, y]
+    vertices already in the local origin-anchored metres frame swarm.py's
+    bots/vehicles operate in (the same frame geoToCart()/cartToGeo()
+    produce) -- no coordinate conversion needed, just wrap each one in a
+    shapely Polygon so sim.env.obstacles is ready for both drawing
+    (visualizer.show_env() already iterates sim.env.obstacles) and
+    avoidance (guided.py's _avoidance_offset()).
+
+    Missing/empty 'obstacles' -> [] (no obstacles configured), same as
+    World.load_yaml()'s handling of the in-repo env files."""
+    print("Reading obstacles from:", filepath)
+    with open(filepath) as f:
+        data = safe_load(f)
+    obstacle_lists = data.get("obstacles")
+    if not obstacle_lists:
+        return []
+    for obs in obstacle_lists:
+        print("obs", obs)
+    return [Polygon(o) for o in obstacle_lists]
+
+
 def send_reposition(
     vehicle, lat, lon, alt_rel, loiter_radius=0.0, clockwise=True, groundspeed=-1
 ):
@@ -160,7 +203,7 @@ def current_process(swarm, stop=False, call_back_action=None):
     return swarm.stopAll(call_back_action)
 
 
-def mission_dir(feature,run_id):
+def mission_dir(feature, run_id):
     """Create and return a fresh ~/Documents/swarm_env/missions/<feature>/<run_id>/
     folder for one grid-generation run. Call once per planner-object
     construction and reuse the returned path -- calling again later would
@@ -182,6 +225,7 @@ def mission_dir(feature,run_id):
 
     makedirs(mission_path, exist_ok=True)
     return mission_path
+
 
 def generate_heights(start_height, num_drones, difference):
     return [start_height + i * difference for i in range(num_drones)]

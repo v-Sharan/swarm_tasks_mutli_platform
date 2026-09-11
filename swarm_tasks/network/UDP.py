@@ -1,3 +1,5 @@
+import json
+import socket
 import socketserver
 import threading
 
@@ -56,3 +58,27 @@ class UDPReceiver(socketserver.ThreadingMixIn, socketserver.UDPServer):
         self.server_close()
         if self._serve_thread:
             self._serve_thread.join()
+
+
+class UDPSender:
+    """Fire-and-forget UDP transmitter.
+
+    One socket, opened once and reused. The destination address is passed
+    on every send() rather than fixed at construction, so callers can
+    point it at a runtime-editable host/port (e.g. Variables.terrain_warn_*)
+    without rebuilding anything.
+    """
+
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def send(self, data, host, port):
+        if isinstance(data, str):
+            data = data.encode()
+        self._sock.sendto(data, (host, int(port)))
+
+    def send_json(self, obj, host, port):
+        self.send(json.dumps(obj), host, port)
+
+    def close(self):
+        self._sock.close()

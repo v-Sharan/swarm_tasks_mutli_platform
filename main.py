@@ -33,11 +33,12 @@ if __name__ == "__main__":
         vehicle_loiter_radius_min_m = vehicles.Loiter_param()
         variables = Variables(vehicle_loiter_radius_min_m=vehicle_loiter_radius_min_m)
         ConfigServer(variables).start()
-        print(variables.vehicle_loiter_radius_min_m)
         variables.heights = [100 + i * 10 for i in range(len(vehicles.drones))]
         # Live-editable config panel. Same object Swarm holds, so an edit
         # lands on the workers' next tick -- no restart.
-        swarm = Swarm(num_bots=len(vehicles.drones), Variables=variables, vehicle=vehicles)
+        swarm = Swarm(
+            num_bots=len(vehicles.drones), Variables=variables, vehicle=vehicles
+        )
         while True:
             # Matplotlib/Qt calls must happen on the main thread; searchSub()
             # (background thread) only publishes state for this to draw.
@@ -58,9 +59,9 @@ if __name__ == "__main__":
                 print("decoded_index", data)
                 msg_parts = data.split(",", 6)
                 selected_uav_raw = msg_parts[6] if len(msg_parts) > 6 else None
-                _, center_lat, center_lon, num_uavs, grid_space, coverage_area = msg_parts[
-                    :6
-                ]
+                _, center_lat, center_lon, num_uavs, grid_space, coverage_area = (
+                    msg_parts[:6]
+                )
                 swarm.search(
                     center_lat=center_lat,
                     center_lon=center_lon,
@@ -143,4 +144,3 @@ if __name__ == "__main__":
                 callBack.set_data()
     except Exception:
         traceback.print_exc()
-        

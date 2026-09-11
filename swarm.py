@@ -13,12 +13,19 @@ from time import sleep
 import threading
 import traceback
 from swarm_tasks.utils.locatePosition import geoToCart, cartToGeo
-from utils import compute_lookahead_target, send_reposition, compass_to_math_rad
+from swarm_tasks.network.UDP import UDPSender
+from utils import (
+    compute_lookahead_target,
+    send_reposition,
+    compass_to_math_rad,
+    read_obstacles,
+)
 from time import time
 import random
 from swarm_tasks.mission.groupsplitauto import AutoSplitMission
 from swarm_tasks.mission.groupsplitspecific import SpecificSplitMission
-from math import sin, cos
+from math import sin, cos, hypot
+from elevation import TerrainMonitor
 
 
 class Swarm:
@@ -26,12 +33,54 @@ class Swarm:
         self.num_bots = num_bots
         self.Variables = Variables
         self.s = sim.Simulation(
-            vehicle_type="fixedwing",
+            vehicle_type="ground",
             world_size=self.Variables.world_size,
             speed=self.Variables.speed,
             bank_angle_deg=self.Variables.bank_angle_deg,
         )
+        # Real mission obstacles, same rectangles.yaml Variables.origin is
+        # read from -- already in the local origin-anchored (x,y) metres
+        # frame the bots/vehicles operate in, so no conversion is needed.
+        # visualizer.Gui.show_env() draws whatever's in sim.env.obstacles
+        # generically, and guided.py's line_waypoint_guidance(avoid_bots=
+        # True, ...) below now steers around them the same way it already
+        # steers around neighbouring bots.
+        self.s.env.obstacles = read_obstacles()
         self.vehicle = vehicle
+
+        # Terrain-clearance watchdog. Every tick _terrain_check() samples
+        # ground elevation under each drone and along the path ahead of
+        # it, and warns (console + UDP) when the ground rises to within
+        # Variables.terrain_clearance_m of that drone's own AMSL altitude.
+        # Elevation comes from the ArduPilot .DAT tiles first and the SRTM
+        # .hgt tiles as a fallback (see elevation.TerrainMonitor).
+        # Advisory only -- it never edits the mission or the goal point.
+        self.terrain = TerrainMonitor(
+            origin=self.Variables.origin,
+            clearance_m=self.Variables.terrain_clearance_m,
+            lookahead_m=self.Variables.terrain_lookahead_m,
+            sample_step_m=self.Variables.terrain_sample_step_m,
+            use_dat=getattr(self.Variables, "terrain_use_dat", True),
+            prefer_dat=getattr(self.Variables, "terrain_prefer_dat", True),
+        )
+        # Pull the tiles covering the mission area up front: already on
+        # disk -> instant, missing + no network -> logged, never fatal.
+        try:
+            size = self.Variables.world_size
+            span_m = max(size) if size else 5000.0
+            self.terrain.prefetch(
+                self.Variables.origin[0],
+                self.Variables.origin[1],
+                range_km=span_m / 1000.0 + 1.0,
+            )
+        except Exception as exc:
+            print(f"[TERRAIN] prefetch skipped: {exc}")
+        self.terrain_udp = UDPSender()
+        # Per-bot timestamp of the last terrain check, so the sampling
+        # (cartToGeo per point) and any warning stay bounded to roughly
+        # one pass every _TERRAIN_CHECK_INTERVAL_S regardless of tick rate.
+        self._last_terrain_check_time = {}
+
         self.gui = viz.Gui(self.s)
         self.current_function = {
             "goal": [False, None],
@@ -142,7 +191,8 @@ class Swarm:
         may already be closed, so reusing one across functions leaves
         the previous run's elements on the new axes -- rebuild instead.
         """
-        if not self.Variables.gui: return
+        if not self.Variables.gui:
+            return
         if self.gui is not None:
             self.gui.close()
         self.gui = viz.Gui(self.s)
@@ -392,7 +442,8 @@ class Swarm:
 
     def gui_tick(self):
         """Call repeatedly from the main thread to drive the plot."""
-        if not self.Variables.gui: return
+        if not self.Variables.gui:
+            return
         if self.gui is None:
             return
         if self._gui_close_requested:
@@ -403,11 +454,6 @@ class Swarm:
         with self._gui_lock:
             state = list(self._gui_state.items())
         if not state:
-            # Nothing running, but keep pumping: update() ends in
-            # plt.pause(), and without it the window stops redrawing
-            # and the desktop greys it out as unresponsive. Throttled
-            # to ~20Hz -- main.py calls this in a tight spin loop, and
-            # a full redraw per iteration pegs a core for nothing.
             now = time()
             if now - self._last_idle_pump >= 0.05:
                 self._last_idle_pump = now
@@ -511,7 +557,95 @@ class Swarm:
                         f"| lead {self.Variables.vehicle_loiter_radius_min_m:.0f}m"
                     )
 
+        self._terrain_check(i, rx, ry, tx, ty)
         return tx, ty
+
+    # Roughly one terrain pass per bot per this many seconds -- terrain
+    # doesn't move and a fixed-wing covers <100m in this window, so a
+    # tighter cadence would only burn cartToGeo calls in the flight loop.
+    _TERRAIN_CHECK_INTERVAL_S = 2.0
+
+    def _terrain_check(self, i, rx, ry, tx, ty):
+        """Sample ground elevation under drone i and along the path ahead
+        toward (tx, ty). If the ground comes within
+        Variables.terrain_clearance_m of the drone's live AMSL altitude,
+        print a warning and send a `terrain_warning` JSON packet by UDP.
+
+        Throttled per bot to _TERRAIN_CHECK_INTERVAL_S. Never touches
+        guidance -- this is an advisory watchdog, not an avoidance law.
+        rx, ry: the drone's position in the local (x, y) metres frame.
+        """
+        if not getattr(self.Variables, "terrain_warn", True):
+            return
+        now = time()
+        last = self._last_terrain_check_time.get(i, 0.0)
+        if now - last < self._TERRAIN_CHECK_INTERVAL_S:
+            return
+        self._last_terrain_check_time[i] = now
+
+        try:
+            frame = self.vehicle.drones[i].location.global_frame
+            drone_amsl, dlat, dlon = frame.alt, frame.lat, frame.lon
+        except Exception:
+            return
+        if drone_amsl is None or dlat is None or dlon is None:
+            return
+
+        # Track live edits from the config panel.
+        self.terrain.clearance_m = self.Variables.terrain_clearance_m
+        self.terrain.lookahead_m = self.Variables.terrain_lookahead_m
+        self.terrain.sample_step_m = self.Variables.terrain_sample_step_m
+        self.terrain.prefer_dat = getattr(self.Variables, "terrain_prefer_dat", True)
+
+        # Sample 0 is straight under the drone (its real GPS lat/lon);
+        # the rest march from the drone toward the lookahead target,
+        # capped at terrain_lookahead_m.
+        samples = [(float(dlat), float(dlon), 0.0)]
+        if tx is not None and ty is not None:
+            seg = hypot(tx - rx, ty - ry)
+            step = max(self.terrain.sample_step_m, 1.0)
+            reach = min(seg, self.terrain.lookahead_m)
+            if seg > 1.0:
+                ux, uy = (tx - rx) / seg, (ty - ry) / seg
+                d = step
+                while d <= reach:
+                    plat, plon = cartToGeo(
+                        self.Variables.origin,
+                        self.Variables.endDistance,
+                        [rx + ux * d, ry + uy * d],
+                    )
+                    samples.append((float(plat), float(plon), d))
+                    d += step
+
+        hit = self.terrain.worst_breach(samples, drone_amsl)
+        if hit is None:
+            return
+        lat, lon, ground, dist, source = hit
+        where = f"{dist:.0f}m ahead" if dist >= 1.0 else "under drone"
+        print(
+            f"TERRAIN WARNING bot {i + 1}: ground {ground:.0f}m AMSL within "
+            f"{self.terrain.clearance_m:.0f}m of drone {drone_amsl:.0f}m AMSL "
+            f"({where}, {lat:.6f}, {lon:.6f}, via {source})"
+        )
+        payload = {
+            "type": "terrain_warning",
+            "bot": i + 1,
+            "lat": round(lat, 6),
+            "lon": round(lon, 6),
+            "ground_amsl": round(float(ground), 1),
+            "drone_amsl": round(float(drone_amsl), 1),
+            "dist_ahead_m": round(float(dist), 0),
+            "source": source,
+            "run_id": self.Variables.run_id,
+        }
+        try:
+            self.terrain_udp.send_json(
+                payload,
+                self.Variables.terrain_warn_host,
+                self.Variables.terrain_warn_port,
+            )
+        except Exception as exc:
+            print(f"[TERRAIN] UDP send failed: {exc}")
 
     def search(
         self, center_lat, center_lon, effective_num_uavs, grid_space, coverage_area
@@ -556,6 +690,7 @@ class Swarm:
         self._reset_gui()
         self.gui.show_env()
         self.gui.show_bots()
+        # self.gui.show_grid()
         curve = BezierCurveMultiple(
             self.Variables.origin,
             float(center_lat),
@@ -662,7 +797,6 @@ class Swarm:
                 for geo in goal_latlon
             ]
         ]
-        print(goal_latlon)
 
         ids = [int(i) for i in ids]
 
@@ -768,10 +902,7 @@ class Swarm:
                             self.Variables.endDistance,
                             [v_lat, v_lon],
                         )
-                        # rx, ry = (
-                        #     vx / 2,
-                        #     vy / 2,
-                        # )
+
                         if not (i + 1) in ids:
                             # Not ours. If nothing else is flying it either,
                             # park its marker on the drone's live position so
@@ -873,7 +1004,6 @@ class Swarm:
             grid_spacing=int(grid_space),
             coverage_area=int(coverage_area),
         )
-        print(split.filePath)
         goal_sequences = wp.load_goals_for_swarm(split.filePath)
         colors = ["red", "blue", "green", "orange", "purple"]
         for i, seq in enumerate(goal_sequences):

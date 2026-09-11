@@ -2,7 +2,7 @@ import json
 import os
 import time
 import uuid
-from utils import read_origin
+from utils import read_origin, read_size
 
 # Same folder as rectangles.yaml (see utils.read_origin) -- one place for
 # this project's runtime config. Whatever the config-server web panel
@@ -34,20 +34,17 @@ def _coerce(current, raw):
     return raw
 
 
-
 class Variables:
     def __init__(
         self,
-        world_size=(3000, 3000),
         speed=30,
         bank_angle_deg=30,
         vehicle_loiter_radius_min_m=1100.0,
         config_path=DEFAULT_CONFIG_PATH,
     ):
         self._config_path = config_path
-
         self.origin = read_origin()
-        self.world_size = world_size
+        self.world_size = read_size()
         self.speed = speed
         self.bank_angle_deg = bank_angle_deg
         self.vehicle_loiter_radius_min_m = vehicle_loiter_radius_min_m + 150
@@ -56,6 +53,29 @@ class Variables:
         self.tick_interval_s = 0.1
         self.run_id = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
         self.heights = []
+
+        # --- Terrain-clearance watchdog (see elevation.TerrainMonitor,
+        # wired into swarm.Swarm._terrain_check) ---------------------------
+        # Every tick it samples SRTM ground elevation under each drone and
+        # along the path ahead of it. When the ground rises to within
+        # terrain_clearance_m of that drone's own AMSL altitude it prints a
+        # warning and sends a `terrain_warning` JSON packet by UDP to
+        # terrain_warn_host:terrain_warn_port. Advisory only -- it never
+        # changes the mission or the commanded goal point.
+        self.terrain_warn = True
+        self.terrain_clearance_m = 30.0
+        self.terrain_lookahead_m = 1000.0
+        self.terrain_sample_step_m = 200.0
+        self.terrain_warn_host = "127.0.0.1"
+        self.terrain_warn_port = 12009
+        # Ground-elevation source. The ArduPilot .DAT tiles in DAT/ are the
+        # exact terrain the flight controller flies to; the SRTM .hgt tiles
+        # in terrain/ are the fallback wherever a .DAT tile/block is
+        # missing. See elevation_dat.DatTerrainManager / elevation.
+        # TerrainMonitor. terrain_use_dat is read once at startup;
+        # terrain_prefer_dat is live.
+        self.terrain_use_dat = True
+        self.terrain_prefer_dat = True
 
         # Minimum time between send_reposition() MAVLink calls per bot --
         # the tick loop runs every tick_interval_s (much faster), so this

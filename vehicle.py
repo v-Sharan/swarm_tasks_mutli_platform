@@ -23,6 +23,7 @@ class Vehicles:
         self.max_workers = max_workers or len(conn_str)
         self.drones = [None] * len(conn_str)
         self.connect_all()
+        print("Drones..........", self.drones)
 
     def get_positions(self, geoToCart, origin, endDistance):
         return [
@@ -52,7 +53,9 @@ class Vehicles:
             for future in as_completed(futures):
                 future.result()  # re-raises any unhandled exception, if you want strictness
 
-        connected = sum(1 for d in self.drones if d is not None)
+        self.drones = [drone for drone in self.drones if drone is not None]
+
+        connected = len(self.drones)
         print(f"Number of Drones Connected: {connected}/{len(self.conn_str)}")
 
     def _connect_one(self, index, conn_string):
@@ -68,5 +71,11 @@ class Vehicles:
 
     def Loiter_param(self):
         return max(
-            (drone.parameters["WP_LOITER_RAD"] for drone in self.drones), default=None
+            (
+                drone.parameters.get("WP_LOITER_RAD")
+                for drone in self.drones
+                if drone.parameters is not None
+                and drone.parameters.get("WP_LOITER_RAD") is not None
+            ),
+            default=None,
         )
