@@ -33,7 +33,7 @@ class Swarm:
         self.num_bots = num_bots
         self.Variables = Variables
         self.s = sim.Simulation(
-            vehicle_type="ground",
+            vehicle_type="fixedwing",
             world_size=self.Variables.world_size,
             speed=self.Variables.speed,
             bank_angle_deg=self.Variables.bank_angle_deg,
@@ -557,7 +557,7 @@ class Swarm:
                         f"| lead {self.Variables.vehicle_loiter_radius_min_m:.0f}m"
                     )
 
-        self._terrain_check(i, rx, ry, tx, ty)
+        self._terrain_check(i, b, rx, ry, tx, ty)
         return tx, ty
 
     # Roughly one terrain pass per bot per this many seconds -- terrain
@@ -565,11 +565,30 @@ class Swarm:
     # tighter cadence would only burn cartToGeo calls in the flight loop.
     _TERRAIN_CHECK_INTERVAL_S = 2.0
 
-    def _terrain_check(self, i, rx, ry, tx, ty):
-        """Sample ground elevation under drone i and along the path ahead
-        toward (tx, ty). If the ground comes within
+    def _terrain_check(self, i, b, rx, ry, tx, ty):
+        """Sample ground elevation under drone i, along the path ahead
+        toward (tx, ty), AND at the bot's actual mission goal / current
+        avoidance-adjusted target. If the ground comes within
         Variables.terrain_clearance_m of the drone's live AMSL altitude,
         print a warning and send a `terrain_warning` JSON packet by UDP.
+
+        The (tx, ty) march below is capped at terrain_lookahead_m, so on
+        its own it would only flag a tall destination once the drone got
+        within that distance of it -- too late to climb in time for a
+        fixed-wing. So the goal itself (b.goal) is always sampled too,
+        uncapped, however far away it is, using the SAME margin -- e.g.
+        home terrain 100m + 100m relative alt = 200m AMSL flying toward a
+        250m-AMSL goal with a 100m clearance margin breaches immediately
+        (200 < 250+100=350), not just in the last 1000m.
+
+        b.last_guidance_target is whatever line_waypoint_guidance() is
+        CURRENTLY steering at -- bot.goal directly, or a _detour_point()
+        corner once obstacle avoidance has rerouted around something.
+        Sampling that (not just the raw heading-projected tx,ty, which
+        knows nothing about avoidance) is what makes this check apply
+        "even in the avoidance" case: the ground under whatever detour
+        path is actually being flown gets checked too, not just the
+        original straight line's ground.
 
         Throttled per bot to _TERRAIN_CHECK_INTERVAL_S. Never touches
         guidance -- this is an advisory watchdog, not an avoidance law.
@@ -616,6 +635,34 @@ class Swarm:
                     )
                     samples.append((float(plat), float(plon), d))
                     d += step
+
+        # Actual mission goal, uncapped by terrain_lookahead_m -- always
+        # checked however far away it is, so a tall destination is
+        # flagged long before the drone is close enough that climbing in
+        # time is no longer possible.
+        if b.goal is not None:
+            gx, gy = b.goal
+            g_dist = hypot(gx - rx, gy - ry)
+            if g_dist > 1.0:
+                glat, glon = cartToGeo(
+                    self.Variables.origin, self.Variables.endDistance, [gx, gy]
+                )
+                samples.append((float(glat), float(glon), g_dist))
+
+        # Whatever line_waypoint_guidance() is CURRENTLY steering at --
+        # bot.goal directly, or a _detour_point() corner once obstacle
+        # avoidance has rerouted around something -- so the ground under
+        # an active detour gets the same check the original straight
+        # line does.
+        avoid_target = getattr(b, "last_guidance_target", None)
+        if avoid_target is not None:
+            ax, ay = avoid_target
+            a_dist = hypot(ax - rx, ay - ry)
+            if a_dist > 1.0:
+                alat, alon = cartToGeo(
+                    self.Variables.origin, self.Variables.endDistance, [ax, ay]
+                )
+                samples.append((float(alat), float(alon), a_dist))
 
         hit = self.terrain.worst_breach(samples, drone_amsl)
         if hit is None:
@@ -921,8 +968,6 @@ class Swarm:
                             and not self._claim_orphan_work(i)
                             and not b.loitering
                         ):
-                            if b.done:
-                                print(f"Bot: {i+1} is completed goal")
                             continue
 
                         # Bot advances its own line every tick regardless of vehicle

@@ -56,14 +56,23 @@ class Variables:
 
         # --- Terrain-clearance watchdog (see elevation.TerrainMonitor,
         # wired into swarm.Swarm._terrain_check) ---------------------------
-        # Every tick it samples SRTM ground elevation under each drone and
-        # along the path ahead of it. When the ground rises to within
-        # terrain_clearance_m of that drone's own AMSL altitude it prints a
-        # warning and sends a `terrain_warning` JSON packet by UDP to
-        # terrain_warn_host:terrain_warn_port. Advisory only -- it never
-        # changes the mission or the commanded goal point.
+        # Every tick it samples SRTM/.DAT ground elevation under each drone,
+        # along the path ahead of it, at the bot's actual goal (however far
+        # away -- not capped by terrain_lookahead_m), and at whatever point
+        # avoidance/_detour_point() is currently steering towards. When the
+        # ground rises to within terrain_clearance_m of that drone's own
+        # AMSL altitude it prints a warning and sends a `terrain_warning`
+        # JSON packet by UDP to terrain_warn_host:terrain_warn_port.
+        # Advisory only -- it never changes the mission or the commanded
+        # goal point.
+        #
+        # e.g. takeoff terrain 100m AMSL + 100m relative alt = drone at
+        # 200m AMSL, flying toward a goal that sits on 250m-AMSL ground:
+        # 200 < 250 + 100 (this margin) -> warns well before arrival,
+        # since ground+clearance_m >= drone_amsl is checked against the
+        # goal point directly, not just samples within terrain_lookahead_m.
         self.terrain_warn = True
-        self.terrain_clearance_m = 30.0
+        self.terrain_clearance_m = 100.0
         self.terrain_lookahead_m = 1000.0
         self.terrain_sample_step_m = 200.0
         self.terrain_warn_host = "127.0.0.1"

@@ -77,5 +77,5 @@ class Vehicles:
                 if drone.parameters is not None
                 and drone.parameters.get("WP_LOITER_RAD") is not None
             ),
-            default=None,
+            default=0,
         )
