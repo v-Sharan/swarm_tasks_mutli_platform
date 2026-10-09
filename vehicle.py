@@ -13,7 +13,37 @@ for _name in ("MutableMapping", "Mapping", "Sequence", "Iterable"):
         setattr(collections, _name, getattr(collections.abc, _name))
 
 from dronekit import connect, APIException
+from pymavlink import mavutil
 from utils import compass_to_math_rad
+
+# Hybrid swarm support: a connected drone's real airframe (quadcopter,
+# fixed-wing plane, VTOL, rover, ...) is reported in every MAVLink
+# HEARTBEAT as a MAV_TYPE_* value, which dronekit already captures into
+# vehicle._vehicle_type as soon as connect() gets its first heartbeat --
+# no extra MAVLink traffic needed. We collapse that down to the
+# simulation's two kinematic models ('fixedwing': bank-limited turns,
+# can't hover/pivot; 'ground': can pivot/hover in place -- covers
+# multirotors, helicopters and rovers) so each bot in a mixed swarm is
+# simulated with the kinematics matching its own real vehicle, instead of
+# one vehicle_type hardcoded for every bot.
+_FIXEDWING_MAV_TYPES = {
+    mavutil.mavlink.MAV_TYPE_FIXED_WING,
+    mavutil.mavlink.MAV_TYPE_VTOL_DUOROTOR,
+    mavutil.mavlink.MAV_TYPE_VTOL_QUADROTOR,
+    mavutil.mavlink.MAV_TYPE_VTOL_TILTROTOR,
+    mavutil.mavlink.MAV_TYPE_VTOL_RESERVED2,
+    mavutil.mavlink.MAV_TYPE_VTOL_RESERVED3,
+    mavutil.mavlink.MAV_TYPE_VTOL_RESERVED4,
+    mavutil.mavlink.MAV_TYPE_VTOL_RESERVED5,
+}
+
+
+def mav_type_to_vehicle_type(mav_type):
+    """MAV_TYPE_* (from a drone's HEARTBEAT) -> this project's sim
+    vehicle_type ('fixedwing' or 'ground'). Unrecognised/unset types
+    default to 'ground', matching the simulation's original behaviour.
+    """
+    return "fixedwing" if mav_type in _FIXEDWING_MAV_TYPES else "ground"
 
 
 class Vehicles:
@@ -22,6 +52,9 @@ class Vehicles:
         self.heartbeat_timeout = heartbeat_timeout
         self.max_workers = max_workers or len(conn_str)
         self.drones = [None] * len(conn_str)
+        # Auto-detected per-drone sim vehicle_type, index-aligned with
+        # self.drones -- see mav_type_to_vehicle_type() above.
+        self.vehicle_types = [None] * len(conn_str)
         self.connect_all()
 
     def get_positions(self, geoToCart, origin, endDistance):
@@ -52,7 +85,32 @@ class Vehicles:
             for future in as_completed(futures):
                 future.result()  # re-raises any unhandled exception, if you want strictness
 
-        connected = sum(1 for d in self.drones if d is not None)
+        # Drop failed slots (None) from both lists together, so
+        # vehicle_types stays index-aligned with drones. Without this,
+        # get_positions() and Loiter_param() below iterate every slot
+        # unconditionally and crash with AttributeError the moment any
+        # one of these ports fails to connect -- which takes down
+        # Swarm's search()/goal()/AutosplitMission() entirely, not just
+        # the one missing drone.
+        #
+        # NOTE: this renumbers bot ids relative to connection order, not
+        # the original port list -- e.g. if the drone on port 14553
+        # (the 3rd configured port) fails, the drone on 14554 becomes
+        # bot 3, not bot 4. There's no stable port->id mapping anywhere
+        # else in this codebase (remove_bot/add_bot/goal all address
+        # bots by plain position in self.drones), so this matches how
+        # the rest of the system already treats len(self.drones) as
+        # the swarm size -- main.py passes it straight through as
+        # num_bots.
+        paired = [
+            (drone, vtype)
+            for drone, vtype in zip(self.drones, self.vehicle_types)
+            if drone is not None
+        ]
+        self.drones = [drone for drone, _ in paired]
+        self.vehicle_types = [vtype for _, vtype in paired]
+
+        connected = len(self.drones)
         print(f"Number of Drones Connected: {connected}/{len(self.conn_str)}")
 
     def _connect_one(self, index, conn_string):
@@ -60,7 +118,9 @@ class Vehicles:
             vehicle = connect(conn_string, heartbeat_timeout=self.heartbeat_timeout)
 
             self.drones[index] = vehicle
-            print(f"Drone {index} connected ({conn_string})")
+            vtype = mav_type_to_vehicle_type(vehicle._vehicle_type)
+            self.vehicle_types[index] = vtype
+            print(f"Drone {index} connected ({conn_string}) -- detected vehicle_type={vtype}")
         except APIException:
             print(f"Drone {index} failed: no heartbeat ({conn_string})")
         except Exception as e:

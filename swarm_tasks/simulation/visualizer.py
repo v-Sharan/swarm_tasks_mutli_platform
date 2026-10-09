@@ -37,7 +37,7 @@ class Gui:
 		self.gps_artists = []
 		self.lookahead_artists = []
 		self.bot_artists = []  # bot circles + heading arrows drawn by show_bots()
-		self.isGui = False
+		self.isGui = isGui
   
 	def show_bots(self):
 		if not self.isGui: return

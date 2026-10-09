@@ -5,7 +5,6 @@ sys.path.insert(
 )
 from swarm_tasks.simulation import simulation as sim
 from swarm_tasks.mission.bezier_curve import BezierCurveMultiple
-from swarm_tasks.simulation import visualizer as viz
 from swarm_tasks.controllers.guided import line_waypoint_guidance
 from swarm_tasks.utils import waypoints as wp
 from swarm_tasks.Thread import Thread
@@ -21,18 +20,71 @@ from swarm_tasks.mission.groupsplitspecific import SpecificSplitMission
 from math import sin, cos
 
 
+class _NullAxes:
+    """Stand-in for Gui.ax when the GUI is off -- search()/goal()/
+    AutosplitMission()/SpecificSplit() plot waypoint markers straight
+    onto self.gui.ax without going through a method, so the no-op has
+    to live here too."""
+
+    def plot(self, *args, **kwargs):
+        return (None,)
+
+
+class _NullGui:
+    """Stand-in for visualizer.Gui when Variables.gui is False -- this
+    is a headless backend service (no plot is ever shown), so the
+    default run should neither import matplotlib/Qt nor pay the cost of
+    opening a figure window just to never draw into it.
+
+    Implements every method swarm.py calls on self.gui as a no-op, so
+    none of those call sites need an `if self.gui is not None` guard --
+    there's always a valid object here, real or null.
+    """
+
+    ax = _NullAxes()
+
+    def show_env(self):
+        pass
+
+    def show_bots(self):
+        pass
+
+    def show_goals(self, *args, **kwargs):
+        pass
+
+    def show_gps_positions(self, *args, **kwargs):
+        pass
+
+    def show_lookahead_targets(self, *args, **kwargs):
+        pass
+
+    def update(self):
+        pass
+
+    def run(self):
+        pass
+
+    def close(self):
+        pass
+
+
 class Swarm:
     def __init__(self, num_bots, Variables, vehicle):
         self.num_bots = num_bots
         self.Variables = Variables
+        self.vehicle = vehicle
+        # Hybrid swarm: each bot gets the kinematics matching its OWN
+        # connected drone (vehicle.vehicle_types, auto-detected per-drone
+        # from its MAVLink HEARTBEAT in vehicle.py) instead of forcing
+        # every bot to 'fixedwing', so quadcopters and fixed-wing planes
+        # can fly in the same swarm correctly.
         self.s = sim.Simulation(
-            vehicle_type="fixedwing",
+            vehicle_type=vehicle.vehicle_types,
             world_size=self.Variables.world_size,
             speed=self.Variables.speed,
             bank_angle_deg=self.Variables.bank_angle_deg,
         )
-        self.vehicle = vehicle
-        self.gui = viz.Gui(self.s)
+        self.gui = self._make_gui()
         self.current_function = {
             "goal": [False, None],
             "search": [False, None],
@@ -135,6 +187,18 @@ class Swarm:
 
         print("Teardown complete: state reset, plot left open")
 
+    def _make_gui(self):
+        """Builds the object self.gui points at: a real visualizer.Gui
+        when Variables.gui is on, or a _NullGui otherwise. matplotlib
+        is only imported in the former case -- a no-GUI backend run
+        never touches it at all.
+        """
+        if not self.Variables.gui:
+            return _NullGui()
+        from swarm_tasks.simulation import visualizer as viz
+
+        return viz.Gui(self.s, isGui=True)
+
     def _reset_gui(self):
         """Close any existing plot and build a fresh Gui bound to the
         current simulation. A Gui caches per-run drawing state (trails,
@@ -142,10 +206,9 @@ class Swarm:
         may already be closed, so reusing one across functions leaves
         the previous run's elements on the new axes -- rebuild instead.
         """
-        if not self.Variables.gui: return
         if self.gui is not None:
             self.gui.close()
-        self.gui = viz.Gui(self.s)
+        self.gui = self._make_gui()
 
     def running_func(self):
         return next(
@@ -450,6 +513,18 @@ class Swarm:
         if dis > 100 and lead_state:
             b.x, b.y = rx, ry
             return None, None
+
+        # Hybrid swarm: a fixedwing bot can't hover at its final
+        # waypoint, so give line_waypoint_guidance() a real orbit radius
+        # there (from the bot's own bank-angle turn radius) instead of
+        # literally freezing in place. A ground/copter bot CAN hover, so
+        # it keeps the original freeze-in-place behaviour (loiter_radius
+        # left None). b.loitering only turns True once the bot has
+        # actually reached that last waypoint -- see guided.py.
+        loiter_radius = None
+        if b.vehicle_type == "fixedwing":
+            loiter_radius = b.turn_radius() or self.Variables.vehicle_loiter_radius_min_m
+
         cmd = line_waypoint_guidance(
             b,
             capture_radius=50.0,
@@ -458,6 +533,7 @@ class Swarm:
             avoid_weight=30.0,
             avoid_min_sep=100.0,
             avoid_radius=100.0,
+            loiter_radius=loiter_radius,
         )
         step_size = (
             (self.Variables.bot_target_speed_mps * self.Variables.tick_interval_s)
@@ -491,12 +567,22 @@ class Swarm:
         now = time()
         last_sent = self._last_reposition_time.get(i, 0)
         if now - last_sent >= self.Variables.reposition_interval_s:
+            # Match the REAL vehicle's arrival behaviour to the sim bot's:
+            # 0.0 ("arrive, don't loiter") while still tracking a line/
+            # lookahead target, same as before for every vehicle type --
+            # and once a fixedwing bot has captured its final waypoint
+            # and started orbiting (b.loitering), send that same real
+            # orbit radius instead, so the aircraft actually holds there
+            # instead of the firmware auto-circling at its own
+            # WP_LOITER_RAD. Copters/ground bots never loiter -- they
+            # hover -- so this stays 0.0 for them regardless.
+            real_loiter_radius = loiter_radius if b.loitering and loiter_radius else 0.0
             send_reposition(
                 self.vehicle.drones[i],
                 lead_lat,
                 lead_lon,
                 self.Variables.heights[i],
-                loiter_radius=0.0,
+                loiter_radius=real_loiter_radius,
             )
             self._last_reposition_time[i] = now
 
@@ -859,6 +945,14 @@ class Swarm:
             if (i + 1) in self.removed_bots:
                 self.s.swarm[i].done = True
 
+        # Hybrid swarm: each bot's own (vehicle-type-appropriate) cruise
+        # speed, keyed by uav id -- lets AutoSplitMission give faster
+        # bots a bigger strip instead of splitting the area equally.
+        drone_speeds = {
+            uav_id: self.s.swarm[uav_id - 1].max_speed
+            for uav_id in selected_uav_ids
+            if 0 <= uav_id - 1 < len(self.s.swarm)
+        }
         split = AutoSplitMission(
             origin=self.Variables.origin,
             center_lat_lons=center_lat_lon_array,
@@ -866,6 +960,7 @@ class Swarm:
             grid_spacing=int(grid_space),
             coverage_area=int(coverage_area),
             run_id=self.Variables.run_id,
+            drone_speeds=drone_speeds,
         )
         split.GroupSplitting(
             center_lat_lons=center_lat_lon_array,
@@ -989,6 +1084,17 @@ class Swarm:
             if (i + 1) in self.removed_bots:
                 self.s.swarm[i].done = True
 
+        # Hybrid swarm: each bot's own (vehicle-type-appropriate) cruise
+        # speed, keyed by uav id -- uav_array is a list of per-area id
+        # lists (e.g. [[2,4],[5,7],[1]]), so flatten it to cover every
+        # id SpecificSplitMission will look up regardless of which area
+        # it's in.
+        drone_speeds = {
+            uav_id: self.s.swarm[uav_id - 1].max_speed
+            for group in uav_array
+            for uav_id in group
+            if 0 <= uav_id - 1 < len(self.s.swarm)
+        }
         split = SpecificSplitMission(
             origin=self.Variables.origin,
             center_lat_lons=center_lat_lon_array,
@@ -996,6 +1102,7 @@ class Swarm:
             grid_spacing=grid_space,
             coverage_area=coverage_area,
             run_id=self.Variables.run_id,
+            drone_speeds=drone_speeds,
         )
         split.GroupSplitting(
             center_lat_lons=center_lat_lon_array,

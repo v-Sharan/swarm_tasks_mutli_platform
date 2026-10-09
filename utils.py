@@ -1,5 +1,5 @@
 from math import cos, sin, radians, degrees
-from yaml import safe_load  # type: ignore
+from yaml import safe_load, safe_dump  # type: ignore
 from os import path,makedirs
 from pymavlink import mavutil
 
@@ -73,6 +73,33 @@ def compute_lookahead_target(x, y, theta, rx, ry, distance, min_lead=None):
     return lookahead_point(x, y, theta, target_along)
 
 
+def _create_placeholder_rectangles_yaml(filepath):
+    """First run on a machine that has never had swarm_env/rectangles.yaml
+    set up: write a placeholder instead of crashing the whole process on
+    a missing-file error before anything else even starts.
+
+    origin is deliberately (0.0, 0.0) -- not this project's own test site
+    -- so a forgotten placeholder is obvious on a map rather than a
+    plausible-looking wrong location. size/obstacles are left empty; this
+    file still needs real survey data before any actual mission planning
+    makes sense.
+    """
+    makedirs(path.dirname(filepath), exist_ok=True)
+    placeholder = {
+        "name": "Rectangles",
+        "size": {"x": 0, "y": 0},
+        "obstacles": [],
+        "origin": "(0.0, 0.0)",
+    }
+    with open(filepath, "w") as f:
+        safe_dump(placeholder, f, sort_keys=False)
+    print(
+        f"WARNING: {filepath} did not exist -- created a placeholder "
+        "(origin 0.0, 0.0, no obstacles). Edit it with your real survey "
+        "site's origin/obstacles before flying a real mission."
+    )
+
+
 def read_origin(
     filepath=path.join(
         path.expanduser("~"), "Documents", "swarm_env", "rectangles.yaml"
@@ -83,6 +110,8 @@ def read_origin(
     the time the arm+altitude wait loop calls fetch_location() -- no
     hardcoded per-site preset, no polling required."""
     print("Reading YAML from:", filepath)
+    if not path.exists(filepath):
+        _create_placeholder_rectangles_yaml(filepath)
     with open(filepath) as f:
         data = safe_load(f)
     origin = data.get("origin")

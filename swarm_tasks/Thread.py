@@ -1,4 +1,5 @@
 import threading
+import traceback
 
 class Thread(threading.Thread):
     """A thread that can be cleanly stopped on demand."""
@@ -21,7 +22,20 @@ class Thread(threading.Thread):
     def run(self):
         while not self._stop_event.is_set():
             if self._target_func:
-                self._target_func(*self._args, **self._kwargs)
+                try:
+                    self._target_func(*self._args, **self._kwargs)
+                except Exception:
+                    # Without this, a target that raises dies silently --
+                    # the thread just vanishes with no log at all, and
+                    # whatever's tracking it (e.g. Swarm.current_function)
+                    # is left thinking a worker is still running when it
+                    # isn't. Stop rather than let the outer while loop
+                    # immediately re-invoke a target that just raised --
+                    # that would spin into a tight crash loop instead.
+                    print(f"[{self.name}] target raised an unhandled exception -- stopping:")
+                    traceback.print_exc()
+                    self._stop_event.set()
+                    break
             self._stop_event.wait(self._interval)  # sleeps but wakes early if stopped
         print(f"[{self.name}] stopped cleanly.")
 

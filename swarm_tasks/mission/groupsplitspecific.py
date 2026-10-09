@@ -5,18 +5,26 @@ from geopy.point import Point
 from swarm_tasks.utils.locatePosition import geoToCart, cartToGeo
 from utils import mission_dir
 import numpy as np
-import matplotlib.pyplot as plt
+# matplotlib is only used by plot_curve() below (a debug/manual-use-only
+# plotter, never called from the real mission path) -- imported there,
+# not here, so the headless backend's import of this module never pulls
+# in matplotlib/Qt at all.
 
 
 class SpecificSplitMission:
     def __init__(
-        self, origin, center_lat_lons, drone_array, grid_spacing, coverage_area,run_id
+        self, origin, center_lat_lons, drone_array, grid_spacing, coverage_area,run_id,
+        drone_speeds=None,
     ):
         self.origin = origin
         self.center_lat_lons = center_lat_lons
         self.drone_array = drone_array
         self.grid_spacing = grid_spacing
         self.coverage_area = coverage_area
+        # Hybrid swarm: {uav_id: cruise speed (m/s)} -- see
+        # AutoSplitMission's identical field (groupsplitauto.py) for why.
+        # None (default): falls back to an equal split, same as before.
+        self.drone_speeds = drone_speeds
         self.mission_dir = mission_dir("specific_split",run_id)
         self.initial_heading = np.radians(0)  # Initial heading angle in radians
         self.G = 9.81  # Gravity (m/s²)
@@ -40,6 +48,19 @@ class SpecificSplitMission:
     def _path_kml(self, uav_id):
         return os.path.join(self.mission_dir, f"uav_{uav_id}.kml")
 
+    def _strip_heights(self, uav_ids, full_height):
+        """See AutoSplitMission._strip_heights() (groupsplitauto.py) --
+        identical weighted-by-cruise-speed split, falling back to equal
+        shares when speed data isn't available for every drone here."""
+        n = len(uav_ids)
+        if not self.drone_speeds or any(
+            self.drone_speeds.get(d) is None for d in uav_ids
+        ):
+            return [full_height / n] * n
+        weights = [max(float(self.drone_speeds[d]), 1e-6) for d in uav_ids]
+        total = sum(weights)
+        return [full_height * w / total for w in weights]
+
     def CreateGridsForSpecifiedAreaAndSpecifiedDrones(
         self,
         center_latitude: float,
@@ -56,16 +77,19 @@ class SpecificSplitMission:
         meters_for_extended_lines = 250
         full_width, full_height = coverage_area, coverage_area
 
-        rectangle_height = full_height / len(uav_ids)
+        strip_heights = self._strip_heights(uav_ids, full_height)
 
         center_point = Point(center_lat, center_lon)
 
         west_edge = distance(meters=full_width / 2).destination(center_point, 270)
 
+        cumulative_height = 0.0
         for i in range(len(uav_ids)):
+            rectangle_height = strip_heights[i]
             top_offset = (
-                (i * rectangle_height) - (full_height / 2) + (rectangle_height / 2)
+                cumulative_height - (full_height / 2) + (rectangle_height / 2)
             )
+            cumulative_height += rectangle_height
 
             top_center = distance(meters=top_offset).destination(center_point, 0)
             top = distance(meters=rectangle_height / 2).destination(top_center, 0)
@@ -300,6 +324,8 @@ class SpecificSplitMission:
         return result
 
     def plot_curve(self):
+        import matplotlib.pyplot as plt
+
         plt.figure(figsize=(8, 6))
         num_of_drones = 0
         for num in self.drone_array:

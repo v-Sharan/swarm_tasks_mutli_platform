@@ -5,12 +5,16 @@ from geopy.point import Point
 from swarm_tasks.utils.locatePosition import geoToCart, cartToGeo
 from utils import mission_dir
 import numpy as np
-import matplotlib.pyplot as plt
+# matplotlib is only used by plot_curve() below (a debug/manual-use-only
+# plotter, never called from the real mission path) -- imported there,
+# not here, so the headless backend's import of this module never pulls
+# in matplotlib/Qt at all.
 
 
 class AutoSplitMission:
     def __init__(
-        self, origin, center_lat_lons, drone_list, grid_spacing, coverage_area,run_id
+        self, origin, center_lat_lons, drone_list, grid_spacing, coverage_area,run_id,
+        drone_speeds=None,
     ):
         self.origin = origin
         self.center_lat_lons = center_lat_lons
@@ -22,6 +26,16 @@ class AutoSplitMission:
         self.num_of_drones = len(drone_list)
         self.grid_spacing = grid_spacing
         self.coverage_area = coverage_area
+        # Hybrid swarm: {uav_id: cruise speed (m/s)}, e.g. swarm.py passes
+        # each bot's real auto-detected-vehicle-type-appropriate
+        # max_speed. CreateGridsForSpecifiedAreaAndSpecifiedDrones() uses
+        # this to give faster drones (typically fixedwings) a
+        # proportionally bigger strip and slower ones (typically
+        # copters) a smaller one, so every bot takes roughly the same
+        # TIME to cover its strip instead of the same AREA -- a plain
+        # equal split makes the slowest drone the mission's bottleneck.
+        # None (default): falls back to an equal split, same as before.
+        self.drone_speeds = drone_speeds
         self.mission_dir = mission_dir("split",run_id)
         self.initial_heading = np.radians(0)  # Initial heading angle in radians
         self.G = 9.81  # Gravity (m/s²)
@@ -45,6 +59,24 @@ class AutoSplitMission:
     def _path_kml(self, uav_id):
         return os.path.join(self.mission_dir, f"uav_{uav_id}.kml")
 
+    def _strip_heights(self, drone_ids_for_area, full_height):
+        """Each drone's share of full_height, weighted by its cruise
+        speed (self.drone_speeds) so a faster drone gets a
+        proportionally bigger strip -- aiming for roughly equal TIME to
+        cover each strip rather than equal area. Falls back to an equal
+        split (the original behaviour) when no speed data is available
+        for ANY of these drones, rather than silently mixing weighted
+        and unweighted shares.
+        """
+        n = len(drone_ids_for_area)
+        if not self.drone_speeds or any(
+            self.drone_speeds.get(d) is None for d in drone_ids_for_area
+        ):
+            return [full_height / n] * n
+        weights = [max(float(self.drone_speeds[d]), 1e-6) for d in drone_ids_for_area]
+        total = sum(weights)
+        return [full_height * w / total for w in weights]
+
     def CreateGridsForSpecifiedAreaAndSpecifiedDrones(
         self,
         center_latitude: float,
@@ -64,17 +96,20 @@ class AutoSplitMission:
 
         full_width, full_height = coverage_area, coverage_area
 
-        rectangle_height = full_height / num_rectangles
+        strip_heights = self._strip_heights(drone_ids_for_area, full_height)
 
         center_point = Point(center_lat, center_lon)
 
         west_edge = distance(meters=full_width / 2).destination(center_point, 270)
         print("center", center_lat, center_lon)
 
+        cumulative_height = 0.0
         for i in range(num_rectangles):
+            rectangle_height = strip_heights[i]
             top_offset = (
-                (i * rectangle_height) - (full_height / 2) + (rectangle_height / 2)
+                cumulative_height - (full_height / 2) + (rectangle_height / 2)
             )
+            cumulative_height += rectangle_height
 
             top_center = distance(meters=top_offset).destination(center_point, 0)
             top = distance(meters=rectangle_height / 2).destination(top_center, 0)
@@ -310,6 +345,8 @@ class AutoSplitMission:
         return result
 
     def plot_curve(self):
+        import matplotlib.pyplot as plt
+
         plt.figure(figsize=(8, 6))
         for num in range(self.num_of_drones):
             predict_path = np.array(self.path[num])

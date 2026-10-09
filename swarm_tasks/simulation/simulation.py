@@ -25,22 +25,16 @@ class Simulation:
 		world_width=None,\
 		world_height=None,\
 		world_resolution=None):
-     	#Fixedwing-friendly defaults: 20m/s cruise, 30deg max bank,
-		#near-constant airspeed (min_speed==speed) unless overridden
-		if vehicle_type == 'fixedwing':
-			if speed is None:
-				speed = utils.robot.DEFAULT_FIXEDWING_SPEED
-			if bank_angle_deg is None and max_turn_speed is None:
-				bank_angle_deg = utils.robot.DEFAULT_BANK_ANGLE_DEG
-			if min_speed is None:
-				min_speed = speed
-		else:
-			if speed is None:
-				speed = utils.robot.MAX_SPEED
-			if min_speed is None:
-				min_speed = utils.robot.DEFAULT_MIN_SPEED
-			if max_turn_speed is None:
-				max_turn_speed = utils.robot.MAX_ANGULAR
+		#vehicle_type: a single string ('fixedwing'/'ground'), applied to
+		#every bot (original behaviour), OR a list with one entry per bot
+		#-- index-aligned with whatever `positions`/num_bots populate()
+		#is later given -- for a hybrid swarm mixing copters and
+		#fixed-wing planes in one run (e.g. vehicle.py's per-drone
+		#auto-detected types). Per-bot kinematic defaults (fixedwing:
+		#20m/s cruise, 30deg max bank, near-constant airspeed; ground:
+		#the original omni defaults) are resolved individually for each
+		#bot in populate() -- see _resolve_kinematics() -- since a mixed
+		#swarm can't share a single set of defaults.
 
 		#Load world into self.env. Size is fully configurable -- pass
 		#world_size=(w,h), or world_width=/world_height= separately, at
@@ -108,7 +102,31 @@ class Simulation:
 		self.swarm = []
 		self.num_bots = 0
 		print("Swarm depopulated: 0 bots remaining")
-		
+
+	@staticmethod
+	def _resolve_kinematics(vehicle_type, speed, min_speed, max_turn_speed, bank_angle_deg):
+		"""Per-bot kinematic defaults for vehicle_type ('fixedwing' or
+		'ground'), filling in only whatever wasn't explicitly given --
+		same rule __init__ used to apply once for the whole (uniform)
+		swarm, now applied per-bot so a hybrid swarm gets each bot its
+		own type-appropriate defaults.
+		"""
+		if vehicle_type == 'fixedwing':
+			if speed is None:
+				speed = utils.robot.DEFAULT_FIXEDWING_SPEED
+			if bank_angle_deg is None and max_turn_speed is None:
+				bank_angle_deg = utils.robot.DEFAULT_BANK_ANGLE_DEG
+			if min_speed is None:
+				min_speed = speed
+		else:
+			if speed is None:
+				speed = utils.robot.MAX_SPEED
+			if min_speed is None:
+				min_speed = utils.robot.DEFAULT_MIN_SPEED
+			if max_turn_speed is None:
+				max_turn_speed = utils.robot.MAX_ANGULAR
+		return speed, min_speed, max_turn_speed, bank_angle_deg
+
 	def _populate(self,positions,num_bots):
 		self.depopulate()
 		if positions is not None:
@@ -142,6 +160,15 @@ class Simulation:
 					"exactly num_bots=%d (x,y) or (x,y,theta) entries -- got %s" \
 					% (n, "None" if positions is None else len(positions)))
 
+		#A per-bot vehicle_type list must cover every bot about to be
+		#spawned -- there's no sensible default for whichever entries
+		#would otherwise be missing.
+		per_bot_type = isinstance(self.vehicle_type, (list, tuple))
+		if per_bot_type and len(self.vehicle_type) != n:
+			raise ValueError(
+				"vehicle_type list must have exactly num_bots=%d entries "
+				"(one per bot) -- got %d" % (n, len(self.vehicle_type)))
+
 		for i in range(n):
 			x,y,theta = None,None,None
 
@@ -167,10 +194,15 @@ class Simulation:
 						"positions[%d]=(%s,%s) is not free (out of bounds "
 						"or inside an obstacle)" % (i, x, y))
 
+			bot_vehicle_type = self.vehicle_type[i] if per_bot_type else self.vehicle_type
+			bot_speed, bot_min_speed, bot_max_turn_speed, bot_bank_angle_deg = \
+				self._resolve_kinematics(bot_vehicle_type, self.speed, \
+					self.min_speed, self.max_turn_speed, self.bank_angle_deg)
+
 			self.swarm.append(utils.robot.Bot(x,y,theta, state=state, neighbourhood_radius=nr,\
-				vehicle_type=self.vehicle_type, speed=self.speed,\
-				min_speed=self.min_speed, max_turn_speed=self.max_turn_speed,\
-				bank_angle_deg=self.bank_angle_deg))
+				vehicle_type=bot_vehicle_type, speed=bot_speed,\
+				min_speed=bot_min_speed, max_turn_speed=bot_max_turn_speed,\
+				bank_angle_deg=bot_bank_angle_deg))
 		
 		for bot in self.swarm:
 			bot.set_sim(self)

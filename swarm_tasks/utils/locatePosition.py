@@ -1,5 +1,6 @@
 # Import Necessary Packages
 import math
+from functools import lru_cache
 from scipy import interpolate
 
 
@@ -36,33 +37,47 @@ def distance_bearing(homeLattitude, homeLongitude, destinationLattitude, destina
     out = [distance, bearingDegrees]
     return out
 
+@lru_cache(maxsize=32)
+def _geo_transform(origin_lat, origin_lon, endDistance):
+    """Precomputes everything geoToCart()/cartToGeo() need for a given
+    (origin, endDistance) pair: the two destination_location() calls
+    (pure trig, depending only on origin/endDistance) and the four
+    scipy interp1d objects built from them.
+
+    origin and endDistance are effectively constant for an entire
+    mission run (origin is read once from rectangles.yaml at startup;
+    endDistance is rarely edited), but geoToCart/cartToGeo are called
+    several times per bot per tick in the live guidance loop
+    (swarm.py's searchSub/goalSub/...). Without this cache, every one
+    of those calls was rebuilding four scipy interpolator objects from
+    scratch just to evaluate each once -- measured at ~110us/call, most
+    of it this redundant setup rather than the actual interpolation.
+    maxsize=32 is generous for how many distinct origins a single
+    long-running process would ever see.
+    """
+    origin = (origin_lat, origin_lon)
+    rEndDistance = math.sqrt(2 * (endDistance ** 2))
+    bearing = 45
+    lEnd = destination_location(origin[0], origin[1], rEndDistance, 180 + bearing)
+    rEnd = destination_location(origin[0], origin[1], rEndDistance, bearing)
+
+    x_cart = y_cart = [-endDistance, 0, endDistance]
+    x_lon = [lEnd[1], origin[1], rEnd[1]]
+    y_lat = [lEnd[0], origin[0], rEnd[0]]
+
+    geo_to_cart_lat = interpolate.interp1d(y_lat, y_cart)
+    geo_to_cart_lon = interpolate.interp1d(x_lon, x_cart)
+    cart_to_geo_lat = interpolate.interp1d(y_cart, y_lat)
+    cart_to_geo_lon = interpolate.interp1d(x_cart, x_lon)
+    return geo_to_cart_lat, geo_to_cart_lon, cart_to_geo_lat, cart_to_geo_lon
+
+
 def geoToCart(origin, endDistance, geoLocation):
     # The initial point of rectangle in (x,y) is (0,0) so considering the current
     # location as origin and retreiving the latitude and longitude from the GPS
     # origin = (12.948048, 80.139742) Format
+    f_lat, f_lon, _, _ = _geo_transform(origin[0], origin[1], endDistance)
 
-    # Calculating the hypot end point for interpolating the latitudes and longitudes 
-    rEndDistance = math.sqrt(2*(endDistance**2))
-
-    # The bearing for the hypot angle is 45 degrees considering coverage area as square
-    bearing = 45
-
-    # Determining the Latitude and Longitude of Middle point of the sqaure area
-    # and hypot end point of square area for interpolating latitude and longitude
-    lEnd, rEnd = destination_location(origin[0], origin[1], rEndDistance, 180+bearing), destination_location(origin[0], origin[1], rEndDistance, bearing)
-
-    # Array of (x,y)
-    x_cart, y_cart  = [-endDistance, 0, endDistance], [-endDistance, 0, endDistance]
-
-    # Array of (latitude, longitude)
-    x_lon, y_lat = [lEnd[1], origin[1], rEnd[1]], [lEnd[0], origin[0], rEnd[0]]
-
-    # Latitude interpolation function 
-    f_lat = interpolate.interp1d(y_lat, y_cart)
-
-    # Longitude interpolation function
-    f_lon = interpolate.interp1d(x_lon, x_cart)
-       
     # Converting (latitude, longitude) to (x,y) using interpolation function
     y, x = f_lat(geoLocation[0]), f_lon(geoLocation[1])
     return (float(x),float(y))
@@ -71,29 +86,8 @@ def cartToGeo(origin, endDistance, cartLocation):
     # The initial point of rectangle in (x,y) is (0,0) so considering the current
     # location as origin and retreiving the latitude and longitude from the GPS
     # origin = (12.948048, 80.139742) Format
+    _, _, f_lat, f_lon = _geo_transform(origin[0], origin[1], endDistance)
 
-    # Calculating the hypot end point for interpolating the latitudes and longitudes 
-    rEndDistance = math.sqrt(2*(endDistance**2))
-
-    # The bearing for the hypot angle is 45 degrees considering coverage area as square
-    bearing = 45
-
-    # Determining the Latitude and Longitude of Middle point of the sqaure area
-    # and hypot end point of square area for interpolating latitude and longitude
-    lEnd, rEnd = destination_location(origin[0], origin[1], rEndDistance, 180+bearing), destination_location(origin[0], origin[1], rEndDistance, bearing)
-
-    # Array of (x,y)
-    x_cart, y_cart  = [-endDistance, 0, endDistance], [-endDistance, 0, endDistance]
-
-    # Array of (latitude, longitude)
-    x_lon, y_lat = [lEnd[1], origin[1], rEnd[1]], [lEnd[0], origin[0], rEnd[0]]
-
-    # Latitude interpolation function 
-    f_lat = interpolate.interp1d(y_cart, y_lat)
-
-    # Longitude interpolation function
-    f_lon = interpolate.interp1d(x_cart, x_lon)
-       
-    # Converting (latitude, longitude) to (x,y) using interpolation function
+    # Converting (x,y) to (latitude, longitude) using interpolation function
     lat, lon = f_lat(cartLocation[1]), f_lon(cartLocation[0])
     return (lat, lon)

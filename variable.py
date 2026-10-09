@@ -75,7 +75,10 @@ class Variables:
         # the formation is bot-in-front / drone-behind again instead
         # of drifting further apart with no correction.
         self.sync_lead_distance_sim = 100.0
-        self.gui = True
+        # This runs as a headless backend service -- no plot window by
+        # default. Flip to True (via the config panel or the saved
+        # config file) only for local debugging with a display attached.
+        self.gui = False
         # Anything saved from a previous run (e.g. edited through the
         # config-server web panel) overrides the defaults set above.
         self.load()

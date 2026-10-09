@@ -5,7 +5,10 @@ from geopy.distance import distance
 from geopy.point import Point
 from swarm_tasks.utils.locatePosition import geoToCart, cartToGeo
 from utils import mission_dir
-import matplotlib.pyplot as plt
+# matplotlib is only used by plot_curve() below (a debug/manual-use-only
+# plotter, never called from the real mission path) -- imported there,
+# not here, so the headless backend's import of this module never pulls
+# in matplotlib/Qt at all.
 
 
 class BezierCurveMultiple:
@@ -331,6 +334,8 @@ class BezierCurveMultiple:
         kml.save(self._path_kml(num))
 
     def plot_curve(self):
+        import matplotlib.pyplot as plt
+
         for num in range(self.num_of_drones):
             predict_path = np.array(self.path[num])
             # sampled_points = np.array(self.sample_points)
