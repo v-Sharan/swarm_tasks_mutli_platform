@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from variable import _coerce
 
 # Read once at Simulation construction -- a runtime edit is inert.
-RESTART_REQUIRED = {"world_size", "speed", "bank_angle_deg"}
+RESTART_REQUIRED = {"world_size", "speed", "copter_speed", "bank_angle_deg"}
 
 # Defined on Variables but read by no code -- editing does nothing at all.
 # Better to say so on the page than to let a knob look live when it isn't.
@@ -39,7 +39,10 @@ UNUSED = {"sync_lead_distance_sim"}
 NOTES = {
     "origin": "lat, lon of the local frame -- read from rectangles.yaml at startup",
     "world_size": "sim world in metres",
-    "speed": "fixed-wing cruise used by the sim bots",
+    "speed": "fixedwing/quadplane cruise (m/s) -- fallback ONLY for a bot "
+    "whose own vehicle didn't report a usable detected speed",
+    "copter_speed": "copter/ground cruise (m/s) -- same fallback role as "
+    "'speed', for copter bots instead of fixedwing ones",
     "bank_angle_deg": "sets the sim turn radius",
     "vehicle_loiter_radius_min_m": "lookahead distance ahead of the bot, metres",
     "bot_target_speed_mps": "how fast the planner bot advances -- above the "

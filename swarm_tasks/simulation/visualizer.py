@@ -7,6 +7,15 @@ from matplotlib import animation
 from matplotlib.lines import Line2D
 import numpy as np
 from shapely.geometry import Point
+
+# Both trails (sim bot path, real drone track) show only the most
+# recent stretch of travel, not the whole mission's history -- an
+# unbounded trail would grow these lists (and the line drawn from
+# them) forever over a long-running mission, both a memory/perf
+# concern and visual clutter right next to the current position.
+TRAIL_MAX_LENGTH_M = 100.0
+
+
 class Gui:
 	def __init__(self, sim,isGui=False):
 		self.sim = sim
@@ -49,7 +58,28 @@ class Gui:
 		self.bot_artists = []  # bot circles + heading arrows drawn by show_bots()
 		self.isGui = isGui
 		self._legend_drawn = False
-  
+
+	@staticmethod
+	def _append_trail_point(xs, ys, x, y, max_length_m=TRAIL_MAX_LENGTH_M):
+		"""Appends (x,y) to the trail lists xs/ys IN PLACE, then trims
+		from the front so the trail never represents more than
+		max_length_m of actual travel -- walks backward from the
+		newest point accumulating segment lengths, and drops every
+		older point once that running total passes max_length_m.
+		"""
+		xs.append(x)
+		ys.append(y)
+		total = 0.0
+		keep_from = 0
+		for i in range(len(xs) - 1, 0, -1):
+			total += ((xs[i] - xs[i-1]) ** 2 + (ys[i] - ys[i-1]) ** 2) ** 0.5
+			if total > max_length_m:
+				keep_from = i
+				break
+		if keep_from > 0:
+			del xs[:keep_from]
+			del ys[:keep_from]
+
 	def show_bots(self):
 		if not self.isGui: return
 		# bot.size is the real collision radius used by the simulation logic
@@ -75,8 +105,7 @@ class Gui:
 			x,y,theta = bot.get_pose()
 			bot_color = self.state_colors[i % len(self.state_colors)]
 
-			self.trail_x[i].append(x)
-			self.trail_y[i].append(y)
+			self._append_trail_point(self.trail_x[i], self.trail_y[i], x, y)
 			self.trail_lines[i].set_data(self.trail_x[i], self.trail_y[i])
 
 			circle = plt.Circle((x,y), vis_r, color=bot_color, fill=True)
@@ -157,8 +186,7 @@ class Gui:
 			color = self.state_colors[i % len(self.state_colors)]
 
 			if i < len(self.drone_trail_lines):
-				self.drone_trail_x[i].append(gx)
-				self.drone_trail_y[i].append(gy)
+				self._append_trail_point(self.drone_trail_x[i], self.drone_trail_y[i], gx, gy)
 				self.drone_trail_lines[i].set_data(self.drone_trail_x[i], self.drone_trail_y[i])
 
 			marker, = self.ax.plot(

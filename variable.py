@@ -40,6 +40,7 @@ class Variables:
         self,
         world_size=(3000, 3000),
         speed=30,
+        copter_speed=5.0,
         bank_angle_deg=30,
         vehicle_loiter_radius_min_m=1100.0,
         config_path=DEFAULT_CONFIG_PATH,
@@ -48,7 +49,15 @@ class Variables:
 
         self.origin = read_origin()
         self.world_size = world_size
-        self.speed = speed
+        # Fallback cruise speed (m/s) used ONLY when a bot's own real
+        # vehicle didn't yield a usable detected speed (vehicle.py reads
+        # TRIM_ARSPD_CM for fixedwing/quadplane, WPNAV_SPEED for copter
+        # -- see swarm.py's Swarm.__init__) -- one per vehicle_type,
+        # since a hybrid swarm's copters and fixedwings genuinely cruise
+        # at very different speeds and a single shared fallback would be
+        # wrong for whichever type it wasn't tuned for.
+        self.speed = speed  # fixedwing/quadplane fallback
+        self.copter_speed = copter_speed  # copter/ground fallback
         self.bank_angle_deg = bank_angle_deg
         self.vehicle_loiter_radius_min_m = vehicle_loiter_radius_min_m + 150
 

@@ -190,27 +190,36 @@ class Simulation:
 		for i in range(n):
 			x,y,theta = None,None,None
 
-			while(1):
-				if initialization=='random':
-					x = np.random.rand()*self.size[0]
-					y = np.random.rand()*self.size[1]
-					theta = np.random.rand()*2*np.pi
+			if initialization == 'explicit':
+				# Real vehicle positions (swarm.py repopulates every bot
+				# from the live GPS-converted x,y every time a mission
+				# starts), not a free spot being picked WITHIN the sim's
+				# own bounded canvas. A real drone's (x,y) can legitimately
+				# be negative or past world_size (e.g. anything south/west
+				# of whatever origin was chosen) or sit over ground the
+				# sim treats as an obstacle polygon -- world_size/obstacles
+				# describe the sim's own visualization/coverage-grid
+				# canvas, they are not a constraint on where a real
+				# aircraft is allowed to be. The bot's job is to track
+				# wherever the vehicle actually is, never to reject it.
+				p = positions[i]
+				x, y = float(p[0]), float(p[1])
+				theta = float(p[2]) if len(p) > 2 else 0.0
+				state = random.randint(0,num_states-1)
+			else:
+				while(1):
+					if initialization=='random':
+						x = np.random.rand()*self.size[0]
+						y = np.random.rand()*self.size[1]
+						theta = np.random.rand()*2*np.pi
 
-					state = random.randint(0,num_states-1)
-				elif initialization=='explicit':
-					p = positions[i]
-					x, y = float(p[0]), float(p[1])
-					theta = float(p[2]) if len(p) > 2 else 0.0
-					state = random.randint(0,num_states-1)
-				else:
-					print("Failed to initialize")
+						state = random.randint(0,num_states-1)
+					else:
+						print("Failed to initialize")
+						break
 
-				if self.check_free(x,y,utils.robot.DEFAULT_SIZE):
-					break
-				elif initialization=='explicit':
-					raise ValueError(
-						"positions[%d]=(%s,%s) is not free (out of bounds "
-						"or inside an obstacle)" % (i, x, y))
+					if self.check_free(x,y,utils.robot.DEFAULT_SIZE):
+						break
 
 			bot_vehicle_type = self._per_bot_value(self.vehicle_type, i)
 			bot_speed_override = self._per_bot_value(self.speed, i)

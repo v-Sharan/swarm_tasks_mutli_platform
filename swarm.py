@@ -80,12 +80,23 @@ class Swarm:
         # can fly in the same swarm correctly.
         # Each bot's own real cruise speed (vehicle.py's per-drone
         # WPNAV_SPEED/TRIM_ARSPD_CM detection) takes priority over the
-        # single Variables.speed used for every bot today -- copters
-        # and fixedwings in a hybrid swarm are independently configured
-        # and genuinely cruise at different speeds. Falls back to
-        # Variables.speed for whichever drone didn't yield a usable
-        # value (param not downloaded, implausible, vehicle missing).
-        speeds = [s if s is not None else self.Variables.speed for s in vehicle.speeds]
+        # type-specific fallback -- copters and fixedwings in a hybrid
+        # swarm are independently configured and genuinely cruise at
+        # different speeds, so there are two fallback knobs (web config
+        # panel), not one: Variables.speed for fixedwing/quadplane bots,
+        # Variables.copter_speed for copter/ground bots -- used only for
+        # whichever drone didn't yield a usable detected value (param
+        # not downloaded, implausible, vehicle missing).
+        speeds = [
+            s
+            if s is not None
+            else (
+                self.Variables.copter_speed
+                if vtype != "fixedwing"
+                else self.Variables.speed
+            )
+            for s, vtype in zip(vehicle.speeds, vehicle.vehicle_types)
+        ]
         self.s = sim.Simulation(
             vehicle_type=vehicle.vehicle_types,
             world_size=self.Variables.world_size,
@@ -559,11 +570,37 @@ class Swarm:
             avoid_radius=100.0,
             loiter_radius=loiter_radius,
         )
-        step_size = (
-            (self.Variables.bot_target_speed_mps * self.Variables.tick_interval_s)
-            / 2.0
-            / b.max_speed
+        # Hybrid swarm: the planner bot must advance at a rate
+        # proportional to ITS OWN vehicle's real cruise speed
+        # (b.max_speed) -- a copter's bot should move far slower than a
+        # fixedwing's, matching how differently they actually fly.
+        #
+        # line_waypoint_guidance() always returns cmd.speed == b.max_speed,
+        # and move()'s own clamp (np.clip/min against [min_speed,
+        # max_speed]) is then a no-op on that same value -- so the actual
+        # displacement is always b.max_speed * step_size. The previous
+        # formula divided step_size BY b.max_speed, which cancelled it
+        # out completely: every bot advanced at the exact same
+        # bot_target_speed_mps-derived rate no matter its vehicle_type or
+        # detected speed. That was invisible while every bot shared one
+        # uniform configured speed (pre-hybrid-swarm); it's very visible
+        # now that copters and fixedwings genuinely differ -- this is
+        # what showed up as copter bots racing far ahead of their much
+        # slower real drones.
+        #
+        # bot_target_speed_mps still gives the bot a deliberate speed
+        # margin over its OWN vehicle's cruise (so the lookahead target
+        # it computes keeps pulling the real vehicle forward instead of
+        # letting it catch up and stall), expressed as a ratio against
+        # Variables.speed -- the baseline bot_target_speed_mps was always
+        # tuned against -- and applied to each bot's own max_speed,
+        # instead of overriding it. For a uniform swarm where every
+        # bot's max_speed equals Variables.speed (the old, pre-hybrid
+        # case), this reduces to exactly the old formula's result.
+        lead_factor = (
+            self.Variables.bot_target_speed_mps / (self.Variables.speed or 1e-6) / 2.0
         )
+        step_size = lead_factor * self.Variables.tick_interval_s
         # step_size = step_size if not send_command else step_size * 2
         b.move(cmd.dir, cmd.speed, step_size=step_size)
 
