@@ -4,6 +4,7 @@ import swarm_tasks.envs as envs
 import matplotlib.patches as patches
 from matplotlib import pyplot as plt
 from matplotlib import animation
+from matplotlib.lines import Line2D
 import numpy as np
 from shapely.geometry import Point
 class Gui:
@@ -30,14 +31,24 @@ class Gui:
 		self.coverage_text1 = None
 		self.uav_trajectories=[]
 		self.uav_positions = {'uav_1': [], 'uav_2': [], 'uav_3': [], 'uav_4': [], 'uav_5': [], 'uav_6':[], 'uav_7':[], 'uav_8':[]}
-		self.trail_lines = []
+		self.trail_lines = []  # sim BOT path (solid) -- drawn by show_bots()
 		self.trail_x = []
 		self.trail_y = []
+		# Real DRONE track (dashed) -- drawn by show_gps_positions(), kept
+		# separate from gps_artists below: gps_artists is the current-
+		# position '+' marker/heading arrow, fully rebuilt every call
+		# (see remove-and-redraw in show_gps_positions), while these
+		# lines must persist and only grow, exactly like trail_lines
+		# above -- that's what makes it a track instead of a dot.
+		self.drone_trail_lines = []
+		self.drone_trail_x = []
+		self.drone_trail_y = []
 		self.goal_artists = []
 		self.gps_artists = []
 		self.lookahead_artists = []
 		self.bot_artists = []  # bot circles + heading arrows drawn by show_bots()
 		self.isGui = isGui
+		self._legend_drawn = False
   
 	def show_bots(self):
 		if not self.isGui: return
@@ -103,8 +114,15 @@ class Gui:
 
 		points: list of (x, y) in the same local sim frame as s.swarm[i].x/y
 		(already converted from lat/lon by the caller), one entry per bot,
-		or None where no live GPS fix is available yet. Current position
-		only -- no trail, redrawn fresh every call.
+		or None where no live GPS fix is available yet.
+
+		The '+' marker and heading arrow show the CURRENT position only --
+		they're removed and redrawn fresh every call (gps_artists, below).
+		The dashed line is the real drone's TRACK: every call appends this
+		point and extends it, the same way show_bots()'s solid trail_lines
+		grow for the sim bot -- so the two can be compared on the plot
+		(dashed drone track vs. solid bot path) to see whether they're
+		actually flying the same route.
 
 		headings: optional list of heading angles (radians, math convention:
 		0 = +x axis, counter-clockwise -- see compass_to_math_rad()) matched
@@ -119,6 +137,15 @@ class Gui:
 		cleaned up by this method's own gps_artists tracking instead.
 		"""
 		if not self.isGui: return
+
+		if not self.drone_trail_lines:
+			for i in range(len(points)):
+				color = self.state_colors[i % len(self.state_colors)]
+				line, = self.ax.plot([], [], '--', color=color, linewidth=1.2, alpha=0.6, zorder=59)
+				self.drone_trail_lines.append(line)
+				self.drone_trail_x.append([])
+				self.drone_trail_y.append([])
+
 		for artist in self.gps_artists:
 			artist.remove()
 		self.gps_artists = []
@@ -128,6 +155,12 @@ class Gui:
 				continue
 			gx, gy = point
 			color = self.state_colors[i % len(self.state_colors)]
+
+			if i < len(self.drone_trail_lines):
+				self.drone_trail_x[i].append(gx)
+				self.drone_trail_y[i].append(gy)
+				self.drone_trail_lines[i].set_data(self.drone_trail_x[i], self.drone_trail_y[i])
+
 			marker, = self.ax.plot(
 				gx, gy, marker='+', markersize=10, markeredgewidth=2,
 				color=color, zorder=60,
@@ -249,9 +282,43 @@ class Gui:
 			self.show_env()
 			self.sim.has_item_moved = False
 		self.show_bots()
+		if not self._legend_drawn:
+			self._draw_legend()
+			self._legend_drawn = True
 		if(self.env_name=="rectangles1"):
 			self.show_coverage(self.area_covered,self.search_time)
-		plt.pause(0.0005)
+		# Draw THIS Gui's own figure/canvas directly, instead of
+		# plt.pause() -- which redraws whatever pyplot's GLOBAL
+		# "current figure" happens to be. _reset_gui() closes and
+		# recreates a brand new Gui (and figure) every time a mission
+		# starts; once that global pointer drifts, plt.pause() can end
+		# up pumping a figure that isn't the one actually on screen,
+		# leaving the real window frozen white even though the tick
+		# loop underneath is still running fine. draw_idle() +
+		# flush_events() target this canvas specifically, so they
+		# can't go stale that way.
+		self.fig.canvas.draw_idle()
+		self.fig.canvas.flush_events()
+
+	def _draw_legend(self):
+		"""One-time legend naming what each marker/line SHAPE means.
+		Color already encodes WHICH bot (state_colors, shared across
+		that bot's goal/bot-circle/drone-marker/lookahead-star), so
+		these proxy handles are neutral-colored and only distinguish
+		shape -- drawn once; matplotlib keeps the legend on the axes
+		on its own, it isn't part of remove_artists()'s per-frame sweep.
+		"""
+		handles = [
+			Line2D([], [], color='k', marker='o', linestyle='-', markersize=6,
+				label='Bot (sim) + path'),
+			Line2D([], [], color='k', marker='+', linestyle='--', markersize=8,
+				markeredgewidth=2, label='Drone (real GPS) + track'),
+			Line2D([], [], color='k', marker='x', linestyle='None', markersize=6,
+				markeredgewidth=2, label='Goal'),
+			Line2D([], [], color='k', marker='*', linestyle='None', markersize=9,
+				label='Lookahead target'),
+		]
+		self.ax.legend(handles=handles, loc='upper left', fontsize=8, framealpha=0.8)
 
 	def remove_artists(self):
 		"""
@@ -343,7 +410,12 @@ class Gui:
 	def run(self):
 		if not self.isGui: return
 		plt.show(block=False)
-		
+		# Force the first real paint right away -- without this the
+		# window can sit blank/white until some later update() call
+		# happens to land on it correctly.
+		self.fig.canvas.draw()
+		self.fig.canvas.flush_events()
+
 	def close(self):
 		if not self.isGui: return
 		#Close THIS Gui's figure specifically: bare plt.close() closes

@@ -104,6 +104,22 @@ class Simulation:
 		print("Swarm depopulated: 0 bots remaining")
 
 	@staticmethod
+	def _per_bot_value(value, i):
+		"""value[i] if value is a per-bot list/tuple, else value
+		unchanged (applied uniformly to every bot). Same convention
+		for every field that can vary per-bot in a hybrid swarm --
+		currently vehicle_type and speed.
+		"""
+		return value[i] if isinstance(value, (list, tuple)) else value
+
+	@staticmethod
+	def _check_per_bot_length(name, value, n):
+		if isinstance(value, (list, tuple)) and len(value) != n:
+			raise ValueError(
+				"%s list must have exactly num_bots=%d entries (one per "
+				"bot) -- got %d" % (name, n, len(value)))
+
+	@staticmethod
 	def _resolve_kinematics(vehicle_type, speed, min_speed, max_turn_speed, bank_angle_deg):
 		"""Per-bot kinematic defaults for vehicle_type ('fixedwing' or
 		'ground'), filling in only whatever wasn't explicitly given --
@@ -160,14 +176,16 @@ class Simulation:
 					"exactly num_bots=%d (x,y) or (x,y,theta) entries -- got %s" \
 					% (n, "None" if positions is None else len(positions)))
 
-		#A per-bot vehicle_type list must cover every bot about to be
-		#spawned -- there's no sensible default for whichever entries
-		#would otherwise be missing.
-		per_bot_type = isinstance(self.vehicle_type, (list, tuple))
-		if per_bot_type and len(self.vehicle_type) != n:
-			raise ValueError(
-				"vehicle_type list must have exactly num_bots=%d entries "
-				"(one per bot) -- got %d" % (n, len(self.vehicle_type)))
+		#vehicle_type and speed can each be given as a single value
+		#(applied to every bot) or a per-bot list/tuple -- e.g.
+		#vehicle.py's auto-detected per-drone vehicle_type and real
+		#configured cruise speed, for a hybrid swarm where copters and
+		#fixedwings are independently configured and genuinely differ.
+		#A list must cover every bot about to be spawned -- there's no
+		#sensible default for whichever entries would otherwise be
+		#missing.
+		self._check_per_bot_length('vehicle_type', self.vehicle_type, n)
+		self._check_per_bot_length('speed', self.speed, n)
 
 		for i in range(n):
 			x,y,theta = None,None,None
@@ -194,9 +212,10 @@ class Simulation:
 						"positions[%d]=(%s,%s) is not free (out of bounds "
 						"or inside an obstacle)" % (i, x, y))
 
-			bot_vehicle_type = self.vehicle_type[i] if per_bot_type else self.vehicle_type
+			bot_vehicle_type = self._per_bot_value(self.vehicle_type, i)
+			bot_speed_override = self._per_bot_value(self.speed, i)
 			bot_speed, bot_min_speed, bot_max_turn_speed, bot_bank_angle_deg = \
-				self._resolve_kinematics(bot_vehicle_type, self.speed, \
+				self._resolve_kinematics(bot_vehicle_type, bot_speed_override, \
 					self.min_speed, self.max_turn_speed, self.bank_angle_deg)
 
 			self.swarm.append(utils.robot.Bot(x,y,theta, state=state, neighbourhood_radius=nr,\

@@ -23,9 +23,9 @@ Usage:
 
 import json
 import socket
+import time
 
 DEFAULT_PORT = 12008
-
 
 class SwarmClient:
     """Thin UDP sender -- one datagram per command."""
@@ -124,18 +124,20 @@ if __name__ == "__main__":
     # Replace with the IP main.py printed at startup ("Ip address: ...").
     # NOT 127.0.0.1/localhost -- main.py binds its UDP listener to the
     # machine's real LAN IP, not the loopback interface.
-    SWARM_HOST = "192.168.1.100"
+    SWARM_HOST = "192.168.199.117"
 
     client = SwarmClient(SWARM_HOST)
     try:
         # Demo: kick off a 10-drone area-coverage search, then tell bot 3
         # to hold position (self-heal) a moment later.
+        client.stop()
+        time.sleep(2)
         client.search(
-            center_lat=12.929337,
-            center_lon=80.017054,
-            num_uavs=10,
-            grid_space=50,
-            coverage_area=2000,
+            center_lat=12.9250554,
+            center_lon=80.0533390,
+            num_uavs=6,
+            grid_space=100,
+            coverage_area=1000,
         )
         # client.remove(3)
         # client.stop()

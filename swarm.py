@@ -78,10 +78,18 @@ class Swarm:
         # from its MAVLink HEARTBEAT in vehicle.py) instead of forcing
         # every bot to 'fixedwing', so quadcopters and fixed-wing planes
         # can fly in the same swarm correctly.
+        # Each bot's own real cruise speed (vehicle.py's per-drone
+        # WPNAV_SPEED/TRIM_ARSPD_CM detection) takes priority over the
+        # single Variables.speed used for every bot today -- copters
+        # and fixedwings in a hybrid swarm are independently configured
+        # and genuinely cruise at different speeds. Falls back to
+        # Variables.speed for whichever drone didn't yield a usable
+        # value (param not downloaded, implausible, vehicle missing).
+        speeds = [s if s is not None else self.Variables.speed for s in vehicle.speeds]
         self.s = sim.Simulation(
             vehicle_type=vehicle.vehicle_types,
             world_size=self.Variables.world_size,
-            speed=self.Variables.speed,
+            speed=speeds,
             bank_angle_deg=self.Variables.bank_angle_deg,
         )
         self.gui = self._make_gui()
@@ -514,20 +522,36 @@ class Swarm:
             b.x, b.y = rx, ry
             return None, None
 
-        # Hybrid swarm: a fixedwing bot can't hover at its final
-        # waypoint, so give line_waypoint_guidance() a real orbit radius
-        # there (from the bot's own bank-angle turn radius) instead of
-        # literally freezing in place. A ground/copter bot CAN hover, so
-        # it keeps the original freeze-in-place behaviour (loiter_radius
-        # left None). b.loitering only turns True once the bot has
-        # actually reached that last waypoint -- see guided.py.
-        loiter_radius = None
+        # Hybrid swarm: each bot's own real vehicle configuration, not
+        # one shared default for every type. vehicle.py's per-drone
+        # radii[i] is WP_LOITER_RAD (metres) for a fixedwing/quadplane,
+        # WPNAV_RADIUS (already converted to metres) for a copter/
+        # ground bot -- None if that drone's parameters didn't yield a
+        # usable value.
+        #
+        # fixedwing: can't hover at its final waypoint, so give
+        # line_waypoint_guidance() a real orbit radius there instead of
+        # literally freezing in place -- prefer the real WP_LOITER_RAD,
+        # falling back to the bank-angle-derived turn radius, then the
+        # Variables default. b.loitering only turns True once the bot
+        # has actually reached that last waypoint -- see guided.py.
+        #
+        # ground/copter: CAN hover, so it keeps freezing in place
+        # (loiter_radius stays None) -- but its own real WPNAV_RADIUS
+        # becomes its capture_radius (how close counts as "arrived"),
+        # instead of the same hardcoded 50.0 for every bot regardless
+        # of type.
+        radius = self.vehicle.radii[i] if i < len(self.vehicle.radii) else None
         if b.vehicle_type == "fixedwing":
-            loiter_radius = b.turn_radius() or self.Variables.vehicle_loiter_radius_min_m
+            loiter_radius = radius or b.turn_radius() or self.Variables.vehicle_loiter_radius_min_m
+            capture_radius = 50.0
+        else:
+            loiter_radius = None
+            capture_radius = radius or 50.0
 
         cmd = line_waypoint_guidance(
             b,
-            capture_radius=50.0,
+            capture_radius=capture_radius,
             freeze_on_arrival=not b.done,
             avoid_bots=True,
             avoid_weight=30.0,

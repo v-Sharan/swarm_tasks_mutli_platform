@@ -46,6 +46,79 @@ def mav_type_to_vehicle_type(mav_type):
     return "fixedwing" if mav_type in _FIXEDWING_MAV_TYPES else "ground"
 
 
+# Sanity bounds for the parameter-derived values below: a hybrid swarm's
+# copters and fixedwings are independently configured and genuinely do
+# cruise at different speeds/radii, so these are read from each
+# vehicle's OWN parameters instead of one shared default -- but an
+# implausible value (param not actually downloaded yet, wrong units,
+# a copter that somehow reports a huge number) should fall back to the
+# caller's own default rather than silently poisoning the sim with a
+# bogus speed. These ranges are deliberately generous, not precise
+# flight limits.
+_MIN_PLAUSIBLE_SPEED_M_S = 1.0
+_MAX_PLAUSIBLE_SPEED_M_S = 60.0
+_MIN_PLAUSIBLE_RADIUS_M = 0.5
+_MAX_PLAUSIBLE_RADIUS_M = 500.0
+
+
+def _plausible(value, lo, hi):
+    return value is not None and lo <= value <= hi
+
+
+def vehicle_cruise_speed_m_s(vehicle, vtype):
+    """This drone's own configured cruise speed (m/s), read from its
+    parameters -- NOT a single hardcoded default for the whole swarm,
+    since a hybrid swarm's copters and fixedwings are independently
+    configured and genuinely cruise at different speeds.
+
+    ArduCopter: WPNAV_SPEED -- horizontal waypoint speed target, in cm/s.
+    ArduPlane (incl. QuadPlane/VTOL): TRIM_ARSPD_CM -- target cruise
+    airspeed. Despite the "_CM" in its name this is reported in m/s on
+    current ArduPilot firmware (a known legacy-naming quirk, not an
+    actual centimetre unit) -- if your firmware version differs and
+    speeds come out implausible, that's the first thing to check.
+
+    Returns None if the parameter is missing or outside a sane range,
+    so callers fall back to their own default instead of a bogus value.
+    """
+    try:
+        if vtype == "fixedwing":
+            raw = vehicle.parameters.get("TRIM_ARSPD_CM")
+            speed = float(raw) if raw is not None else None
+        else:
+            raw = vehicle.parameters.get("WPNAV_SPEED")
+            speed = float(raw) / 100.0 if raw is not None else None
+    except Exception:
+        return None
+    return speed if _plausible(speed, _MIN_PLAUSIBLE_SPEED_M_S, _MAX_PLAUSIBLE_SPEED_M_S) else None
+
+
+def vehicle_waypoint_radius_m(vehicle, vtype):
+    """This drone's own configured waypoint-arrival radius (metres),
+    read from its parameters:
+
+    ArduPlane (incl. QuadPlane/VTOL): WP_LOITER_RAD -- the radius it
+    orbits its final waypoint at (it can't hover, so it circles instead
+    of freezing). Already in metres.
+    ArduCopter: WPNAV_RADIUS -- how close it must get to a waypoint to
+    consider it reached, in cm (converted to metres here). Copters
+    never orbit (they can hover), so this becomes the bot's
+    capture_radius instead of a loiter radius.
+
+    Returns None if the parameter is missing or outside a sane range.
+    """
+    try:
+        if vtype == "fixedwing":
+            raw = vehicle.parameters.get("WP_LOITER_RAD")
+            radius = abs(float(raw)) if raw is not None else None
+        else:
+            raw = vehicle.parameters.get("WPNAV_RADIUS")
+            radius = float(raw) / 100.0 if raw is not None else None
+    except Exception:
+        return None
+    return radius if _plausible(radius, _MIN_PLAUSIBLE_RADIUS_M, _MAX_PLAUSIBLE_RADIUS_M) else None
+
+
 class Vehicles:
     def __init__(self, conn_str, heartbeat_timeout=3, max_workers=None):
         self.conn_str = conn_str
@@ -55,6 +128,13 @@ class Vehicles:
         # Auto-detected per-drone sim vehicle_type, index-aligned with
         # self.drones -- see mav_type_to_vehicle_type() above.
         self.vehicle_types = [None] * len(conn_str)
+        # Each drone's own configured cruise speed (m/s) and waypoint-
+        # arrival radius (m), read from its parameters -- see
+        # vehicle_cruise_speed_m_s()/vehicle_waypoint_radius_m() above.
+        # None where the drone's parameters didn't yield a plausible
+        # value; callers fall back to their own default in that case.
+        self.speeds = [None] * len(conn_str)
+        self.radii = [None] * len(conn_str)
         self.connect_all()
 
     def get_positions(self, geoToCart, origin, endDistance):
@@ -103,12 +183,16 @@ class Vehicles:
         # the swarm size -- main.py passes it straight through as
         # num_bots.
         paired = [
-            (drone, vtype)
-            for drone, vtype in zip(self.drones, self.vehicle_types)
+            (drone, vtype, speed, radius)
+            for drone, vtype, speed, radius in zip(
+                self.drones, self.vehicle_types, self.speeds, self.radii
+            )
             if drone is not None
         ]
-        self.drones = [drone for drone, _ in paired]
-        self.vehicle_types = [vtype for _, vtype in paired]
+        self.drones = [drone for drone, _, _, _ in paired]
+        self.vehicle_types = [vtype for _, vtype, _, _ in paired]
+        self.speeds = [speed for _, _, speed, _ in paired]
+        self.radii = [radius for _, _, _, radius in paired]
 
         connected = len(self.drones)
         print(f"Number of Drones Connected: {connected}/{len(self.conn_str)}")
@@ -120,7 +204,14 @@ class Vehicles:
             self.drones[index] = vehicle
             vtype = mav_type_to_vehicle_type(vehicle._vehicle_type)
             self.vehicle_types[index] = vtype
-            print(f"Drone {index} connected ({conn_string}) -- detected vehicle_type={vtype}")
+            speed = vehicle_cruise_speed_m_s(vehicle, vtype)
+            radius = vehicle_waypoint_radius_m(vehicle, vtype)
+            self.speeds[index] = speed
+            self.radii[index] = radius
+            print(
+                f"Drone {index} connected ({conn_string}) -- "
+                f"detected vehicle_type={vtype} speed={speed} radius={radius}"
+            )
         except APIException:
             print(f"Drone {index} failed: no heartbeat ({conn_string})")
         except Exception as e:
