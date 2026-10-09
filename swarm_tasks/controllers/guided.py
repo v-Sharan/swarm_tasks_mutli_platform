@@ -330,8 +330,16 @@ def line_waypoint_guidance(
     # the sim. See test_goal_csv_sequence.py's main loop for the send side.
     bot.last_guidance_target = (float(target[0]), float(target[1]))
 
+    # The actual bank-angle-derived turn-rate limit is enforced in
+    # Bot.move() (max_turn_speed * step_size, correctly in rad/tick) --
+    # there was a redundant clip here too, but it compared bearing
+    # (radians, max +-pi =~ 3.14) directly against bot.bank_angle_deg
+    # (degrees, e.g. 30), so for any plausible bank angle it could never
+    # actually constrain anything, and crashed outright for a ground/
+    # copter bot built with bank_angle_deg left at its None default
+    # (bank angle isn't a meaningful concept for an omnidirectional
+    # vehicle type in the first place).
     bearing = np.arctan2(target[1] - bot.y, target[0] - bot.x)
-    bearing = max(-bot.bank_angle_deg, min(bot.bank_angle_deg, bearing))
     return Cmd(dir_=bearing, speed=bot.max_speed)
 
 

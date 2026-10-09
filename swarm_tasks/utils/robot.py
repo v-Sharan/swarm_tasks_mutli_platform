@@ -326,14 +326,34 @@ class Bot:
         The size of step os step_size*speed
         The speed used is the minimum of speed param and self.max_speed
 
-        'ground' bots (default, original behaviour): if the desired turn
-        exceeds max_turn_speed, the bot pivots in place without translating.
+        'ground'/copter bots: omnidirectional, like a real multirotor --
+        it doesn't need to face its direction of travel before it can
+        move there. Always translates forward at a speed clamped to
+        [0, max_speed] (it CAN slow to a stop/hover, unlike a
+        fixedwing), while the heading turns toward `direction` at a
+        rate bounded by max_turn_speed, purely for a readable heading
+        arrow on the plot -- it never gates movement.
 
         'fixedwing' bots: cannot stop or pivot in place. Every step it
         translates forward at a speed clamped to [min_speed, max_speed],
         while the heading turns toward `direction` at a rate bounded by
         max_turn_speed (a Dubins-car / bank-limited-turn approximation of
         fixed-wing flight).
+
+        An earlier version of the ground/copter branch pivoted in place
+        (skipped translating entirely) whenever the needed heading
+        correction was large, using a buggy threshold that compared the
+        correction (an angle) directly against max_turn_speed (a rate,
+        rad/s) with no *step_size -- so it pivoted by up to a full
+        max_turn_speed radians in ONE tick (far more than the configured
+        rate actually allows) and moved 0m that tick. Harmless for a
+        bot flying alone (it reaches the right heading in 1-2 ticks
+        either way), but under avoid_bots repulsion from a nearby bot
+        the commanded direction itself shifts by a similar amount tick
+        to tick -- confirmed by reproducing it directly: a bot stuck
+        re-aiming at a moving target for 259 of 300 ticks, 0m net
+        progress toward its goal. That's what showed up as a bot
+        "loitering" near one point instead of advancing to the next.
         """
         turn_angle = direction - self.theta
         while turn_angle >= np.pi:
@@ -341,24 +361,17 @@ class Bot:
         while turn_angle <= -np.pi:
             turn_angle += 2 * np.pi
 
-        if self.vehicle_type == "fixedwing":
-            # Always translate: clamp turn rate (rad/s * dt), never pivot-in-place
-            max_turn_this_step = self.max_turn_speed * step_size
-            turn_step = np.clip(turn_angle, -max_turn_this_step, max_turn_this_step)
-            self.turn(turn_step)
+        max_turn_this_step = self.max_turn_speed * step_size
+        turn_step = np.clip(turn_angle, -max_turn_this_step, max_turn_this_step)
+        self.turn(turn_step)
 
+        if self.vehicle_type == "fixedwing":
             # Cannot stop/hover: speed is clamped to [min_speed, max_speed]
             cmd_speed = np.clip(speed, self.min_speed, self.max_speed)
-            self.step(cmd_speed * step_size)
-
         else:
-            # Original ground-robot behaviour
-            if np.abs(turn_angle) > self.max_turn_speed:
-                # If direction-theta is large, only turn without moving
-                self.turn(np.sign(turn_angle) * self.max_turn_speed)
-            else:
-                self.turn(turn_angle)
-                self.step(min(speed, self.max_speed) * step_size)
+            # Can slow to a stop/hover, but never commanded backwards
+            cmd_speed = np.clip(speed, 0.0, self.max_speed)
+        self.step(cmd_speed * step_size)
 
     def unstuck(self, r):
         """

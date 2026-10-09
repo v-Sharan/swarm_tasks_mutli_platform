@@ -73,18 +73,26 @@ def vehicle_cruise_speed_m_s(vehicle, vtype):
 
     ArduCopter: WPNAV_SPEED -- horizontal waypoint speed target, in cm/s.
     ArduPlane (incl. QuadPlane/VTOL): TRIM_ARSPD_CM -- target cruise
-    airspeed. Despite the "_CM" in its name this is reported in m/s on
-    current ArduPilot firmware (a known legacy-naming quirk, not an
-    actual centimetre unit) -- if your firmware version differs and
-    speeds come out implausible, that's the first thing to check.
+    airspeed, ALSO in cm/s (ArduPilot forum/parameter docs confirm cm/s,
+    e.g. 1500 = 15 m/s). ArduPlane 4.5 renamed this to AIRSPEED_CRUISE
+    AND converted it to m/s (confirmed by the official 4.5 release
+    notes -- part of a deliberate "centi-units -> real units" cleanup
+    across plane parameters), so on 4.5+ firmware TRIM_ARSPD_CM genuinely
+    doesn't exist at all; AIRSPEED_CRUISE is tried next and used as-is
+    (no /100 -- it really is already m/s, unlike its predecessor).
 
-    Returns None if the parameter is missing or outside a sane range,
-    so callers fall back to their own default instead of a bogus value.
+    Returns None if neither parameter is present or the result is
+    outside a sane range, so callers fall back to their own default
+    instead of a bogus value.
     """
     try:
         if vtype == "fixedwing":
             raw = vehicle.parameters.get("TRIM_ARSPD_CM")
-            speed = float(raw) if raw is not None else None
+            if raw is not None:
+                speed = float(raw) / 100.0
+            else:
+                raw = vehicle.parameters.get("AIRSPEED_CRUISE")
+                speed = float(raw) if raw is not None else None
         else:
             raw = vehicle.parameters.get("WPNAV_SPEED")
             speed = float(raw) / 100.0 if raw is not None else None
@@ -119,6 +127,43 @@ def vehicle_waypoint_radius_m(vehicle, vtype):
     return radius if _plausible(radius, _MIN_PLAUSIBLE_RADIUS_M, _MAX_PLAUSIBLE_RADIUS_M) else None
 
 
+_MIN_PLAUSIBLE_BANK_DEG = 5.0
+_MAX_PLAUSIBLE_BANK_DEG = 75.0
+
+
+def vehicle_bank_angle_deg(vehicle, vtype):
+    """This fixedwing/quadplane drone's own configured max bank angle
+    (degrees), read from its parameters -- NOT the single
+    Variables.bank_angle_deg applied to every fixedwing bot by default.
+
+    A bot that assumes a steeper bank than the real aircraft can
+    actually fly turns tighter/faster than the real aircraft can
+    physically match -- confirmed by observation: the bot pulling
+    ahead of its drone specifically during turns (not on straight
+    legs, where speed alone governs it -- see
+    vehicle_cruise_speed_m_s()).
+
+    ArduPlane: ROLL_LIMIT_DEG (current firmware, already degrees) if
+    present, else the legacy LIM_ROLL_CD (centidegrees, /100). Not
+    applicable to copters (vtype != 'fixedwing' returns None).
+
+    Returns None if neither parameter is available or the result is
+    outside a sane range, so callers fall back to Variables.bank_angle_deg.
+    """
+    if vtype != "fixedwing":
+        return None
+    try:
+        raw = vehicle.parameters.get("ROLL_LIMIT_DEG")
+        if raw is not None:
+            bank = float(raw)
+        else:
+            raw = vehicle.parameters.get("LIM_ROLL_CD")
+            bank = float(raw) / 100.0 if raw is not None else None
+    except Exception:
+        return None
+    return bank if _plausible(bank, _MIN_PLAUSIBLE_BANK_DEG, _MAX_PLAUSIBLE_BANK_DEG) else None
+
+
 class Vehicles:
     def __init__(self, conn_str, heartbeat_timeout=3, max_workers=None):
         self.conn_str = conn_str
@@ -128,13 +173,16 @@ class Vehicles:
         # Auto-detected per-drone sim vehicle_type, index-aligned with
         # self.drones -- see mav_type_to_vehicle_type() above.
         self.vehicle_types = [None] * len(conn_str)
-        # Each drone's own configured cruise speed (m/s) and waypoint-
-        # arrival radius (m), read from its parameters -- see
-        # vehicle_cruise_speed_m_s()/vehicle_waypoint_radius_m() above.
-        # None where the drone's parameters didn't yield a plausible
-        # value; callers fall back to their own default in that case.
+        # Each drone's own configured cruise speed (m/s), waypoint-
+        # arrival radius (m), and -- fixedwing/quadplane only -- max
+        # bank angle (degrees), read from its parameters -- see
+        # vehicle_cruise_speed_m_s()/vehicle_waypoint_radius_m()/
+        # vehicle_bank_angle_deg() above. None where the drone's
+        # parameters didn't yield a plausible value; callers fall back
+        # to their own default in that case.
         self.speeds = [None] * len(conn_str)
         self.radii = [None] * len(conn_str)
+        self.bank_angles = [None] * len(conn_str)
         self.connect_all()
 
     def get_positions(self, geoToCart, origin, endDistance):
@@ -183,16 +231,18 @@ class Vehicles:
         # the swarm size -- main.py passes it straight through as
         # num_bots.
         paired = [
-            (drone, vtype, speed, radius)
-            for drone, vtype, speed, radius in zip(
-                self.drones, self.vehicle_types, self.speeds, self.radii
+            (drone, vtype, speed, radius, bank)
+            for drone, vtype, speed, radius, bank in zip(
+                self.drones, self.vehicle_types, self.speeds, self.radii,
+                self.bank_angles,
             )
             if drone is not None
         ]
-        self.drones = [drone for drone, _, _, _ in paired]
-        self.vehicle_types = [vtype for _, vtype, _, _ in paired]
-        self.speeds = [speed for _, _, speed, _ in paired]
-        self.radii = [radius for _, _, _, radius in paired]
+        self.drones = [drone for drone, _, _, _, _ in paired]
+        self.vehicle_types = [vtype for _, vtype, _, _, _ in paired]
+        self.speeds = [speed for _, _, speed, _, _ in paired]
+        self.radii = [radius for _, _, _, radius, _ in paired]
+        self.bank_angles = [bank for _, _, _, _, bank in paired]
 
         connected = len(self.drones)
         print(f"Number of Drones Connected: {connected}/{len(self.conn_str)}")
@@ -206,11 +256,14 @@ class Vehicles:
             self.vehicle_types[index] = vtype
             speed = vehicle_cruise_speed_m_s(vehicle, vtype)
             radius = vehicle_waypoint_radius_m(vehicle, vtype)
+            bank = vehicle_bank_angle_deg(vehicle, vtype)
             self.speeds[index] = speed
             self.radii[index] = radius
+            self.bank_angles[index] = bank
             print(
                 f"Drone {index} connected ({conn_string}) -- "
-                f"detected vehicle_type={vtype} speed={speed} radius={radius}"
+                f"detected vehicle_type={vtype} speed={speed} radius={radius} "
+                f"bank_angle_deg={bank}"
             )
         except APIException:
             print(f"Drone {index} failed: no heartbeat ({conn_string})")

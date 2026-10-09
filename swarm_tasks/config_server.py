@@ -16,11 +16,17 @@ can never hold the process open or drag in a dependency.
     server.start()          # prints the URL
 
 Caveats it enforces rather than hides:
-  * A few fields are only read when the Simulation is CONSTRUCTED
-    (world_size, speed, bank_angle_deg) -- editing them at runtime does
-    nothing until restart, so they are flagged, not silently accepted.
-    A restart DOES pick up the saved value, since it's re-applied before
-    the Simulation is built.
+  * world_size is only read when the Simulation (and its World/
+    CoverageGrid) is CONSTRUCTED -- editing it at runtime does nothing
+    until restart, so it's flagged, not silently accepted. A restart
+    DOES pick up the saved value, since it's re-applied before the
+    Simulation is built.
+  * speed/copter_speed/bank_angle_deg are picked up the next time a
+    mission command runs (search/goal/split/specificsplit) -- Swarm's
+    _populate_sim() re-reads Variables fresh right before each one
+    destroys and rebuilds every bot, which already happens on every
+    mission start. Not flagged here: no restart needed, just a new
+    command.
 """
 
 import json
@@ -29,29 +35,41 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from variable import _coerce
 
-# Read once at Simulation construction -- a runtime edit is inert.
-RESTART_REQUIRED = {"world_size", "speed", "copter_speed", "bank_angle_deg"}
+# Read once at Simulation CONSTRUCTION (not at _populate() time, which
+# re-reads Variables fresh on every mission command) -- a runtime edit
+# is inert until the whole process restarts. See the module docstring.
+RESTART_REQUIRED = {"world_size"}
 
-# Defined on Variables but read by no code -- editing does nothing at all.
-# Better to say so on the page than to let a knob look live when it isn't.
-UNUSED = {"sync_lead_distance_sim"}
+# Fields that exist on Variables but are read by no code would land
+# here, so the page says "not read" instead of letting a knob look live
+# when it isn't. Nothing currently in that state -- bot_target_speed_mps
+# and sync_lead_distance_sim were removed from Variables entirely rather
+# than left around unused (see variable.py).
+UNUSED = set()
 
 NOTES = {
     "origin": "lat, lon of the local frame -- read from rectangles.yaml at startup",
     "world_size": "sim world in metres",
     "speed": "fixedwing/quadplane cruise (m/s) -- fallback ONLY for a bot "
-    "whose own vehicle didn't report a usable detected speed",
+    "whose own vehicle didn't report a usable detected speed. Applies on "
+    "the next search/goal/split command, not mid-mission",
     "copter_speed": "copter/ground cruise (m/s) -- same fallback role as "
-    "'speed', for copter bots instead of fixedwing ones",
-    "bank_angle_deg": "sets the sim turn radius",
-    "vehicle_loiter_radius_min_m": "lookahead distance ahead of the bot, metres",
-    "bot_target_speed_mps": "how fast the planner bot advances -- above the "
-    "aircraft's real cruise and it will outrun the drone",
+    "'speed', for copter bots instead of fixedwing ones. Also applies on "
+    "the next mission command",
+    "bank_angle_deg": "max bank angle (degrees) -- fallback ONLY for a "
+    "fixedwing bot whose own vehicle didn't report ROLL_LIMIT_DEG/"
+    "LIM_ROLL_CD. Applies on the next mission command",
+    "vehicle_loiter_radius_min_m": "lookahead distance ahead of the bot, "
+    "metres -- FIXEDWING bots only, see copter_lookahead_m for copters",
+    "copter_lookahead_m": "lookahead distance ahead of the bot, metres -- "
+    "COPTER/ground bots only. Keep this small (tens of metres, not "
+    "hundreds) -- a copter is far slower and more precise than a "
+    "fixedwing, so a fixedwing-scale lookahead sends it toward a point "
+    "it may take minutes to reach",
     "tick_interval_s": "worker loop period",
     "reposition_interval_s": "min seconds between MAVLink DO_REPOSITION per bot",
     "debug_reposition": "print commanded vs actual position every 2s per bot",
     "endDistance": "geoToCart/cartToGeo scale -- other fields depend on it",
-    "sync_lead_distance_sim": "how far the bot leads the drone after a resync",
 }
 
 

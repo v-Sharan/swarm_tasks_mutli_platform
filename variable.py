@@ -59,9 +59,27 @@ class Variables:
         self.speed = speed  # fixedwing/quadplane fallback
         self.copter_speed = copter_speed  # copter/ground fallback
         self.bank_angle_deg = bank_angle_deg
-        self.vehicle_loiter_radius_min_m = vehicle_loiter_radius_min_m + 150
+        # Lookahead distance (metres) ahead of a FIXEDWING bot that
+        # compute_lookahead_target() projects the real MAVLink
+        # DO_REPOSITION target from -- main.py derives the base value
+        # from Loiter_param() (the largest WP_LOITER_RAD among
+        # connected fixedwing drones), which is None whenever no
+        # connected drone reported one (an all-copter swarm, or one
+        # whose planes hadn't finished downloading parameters yet) --
+        # treat that as "nothing to go on" rather than crashing on
+        # None + 150.
+        self.vehicle_loiter_radius_min_m = (vehicle_loiter_radius_min_m or 0) + 150
+        # Same role as vehicle_loiter_radius_min_m above, but for
+        # copter/ground bots -- there's no copter-equivalent of
+        # WP_LOITER_RAD to auto-detect a base value from (a copter
+        # doesn't orbit, it hovers), and a fixedwing-scale lookahead
+        # (hundreds of metres) is wildly too far ahead for a copter's
+        # much slower, more precise flight -- without this, every
+        # copter bot used the SAME huge fixedwing lookahead, sending
+        # the real copter toward a point it could take minutes to
+        # reach even though its bot was already there.
+        self.copter_lookahead_m = 20.0
 
-        self.bot_target_speed_mps = 40.0
         self.tick_interval_s = 0.1
         self.run_id = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
         self.heights = []
@@ -78,12 +96,6 @@ class Variables:
 
         self.endDistance = 50000
 
-        # Once the vehicle has drifted past the gate distance (see
-        # searchSub's dis > threshold branch), resync by snapping the
-        # bot to lead the vehicle by exactly this many sim units, so
-        # the formation is bot-in-front / drone-behind again instead
-        # of drifting further apart with no correction.
-        self.sync_lead_distance_sim = 100.0
         # This runs as a headless backend service -- no plot window by
         # default. Flip to True (via the config panel or the saved
         # config file) only for local debugging with a display attached.

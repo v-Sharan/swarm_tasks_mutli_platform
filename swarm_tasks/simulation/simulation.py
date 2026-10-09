@@ -176,16 +176,17 @@ class Simulation:
 					"exactly num_bots=%d (x,y) or (x,y,theta) entries -- got %s" \
 					% (n, "None" if positions is None else len(positions)))
 
-		#vehicle_type and speed can each be given as a single value
-		#(applied to every bot) or a per-bot list/tuple -- e.g.
-		#vehicle.py's auto-detected per-drone vehicle_type and real
-		#configured cruise speed, for a hybrid swarm where copters and
-		#fixedwings are independently configured and genuinely differ.
-		#A list must cover every bot about to be spawned -- there's no
-		#sensible default for whichever entries would otherwise be
-		#missing.
+		#vehicle_type, speed and bank_angle_deg can each be given as a
+		#single value (applied to every bot) or a per-bot list/tuple --
+		#e.g. vehicle.py's auto-detected per-drone vehicle_type, real
+		#configured cruise speed and (fixedwing) max bank angle, for a
+		#hybrid swarm where copters and fixedwings are independently
+		#configured and genuinely differ. A list must cover every bot
+		#about to be spawned -- there's no sensible default for
+		#whichever entries would otherwise be missing.
 		self._check_per_bot_length('vehicle_type', self.vehicle_type, n)
 		self._check_per_bot_length('speed', self.speed, n)
+		self._check_per_bot_length('bank_angle_deg', self.bank_angle_deg, n)
 
 		for i in range(n):
 			x,y,theta = None,None,None
@@ -223,9 +224,10 @@ class Simulation:
 
 			bot_vehicle_type = self._per_bot_value(self.vehicle_type, i)
 			bot_speed_override = self._per_bot_value(self.speed, i)
+			bot_bank_angle_override = self._per_bot_value(self.bank_angle_deg, i)
 			bot_speed, bot_min_speed, bot_max_turn_speed, bot_bank_angle_deg = \
 				self._resolve_kinematics(bot_vehicle_type, bot_speed_override, \
-					self.min_speed, self.max_turn_speed, self.bank_angle_deg)
+					self.min_speed, self.max_turn_speed, bot_bank_angle_override)
 
 			self.swarm.append(utils.robot.Bot(x,y,theta, state=state, neighbourhood_radius=nr,\
 				vehicle_type=bot_vehicle_type, speed=bot_speed,\

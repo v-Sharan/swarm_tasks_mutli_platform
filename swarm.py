@@ -78,30 +78,11 @@ class Swarm:
         # from its MAVLink HEARTBEAT in vehicle.py) instead of forcing
         # every bot to 'fixedwing', so quadcopters and fixed-wing planes
         # can fly in the same swarm correctly.
-        # Each bot's own real cruise speed (vehicle.py's per-drone
-        # WPNAV_SPEED/TRIM_ARSPD_CM detection) takes priority over the
-        # type-specific fallback -- copters and fixedwings in a hybrid
-        # swarm are independently configured and genuinely cruise at
-        # different speeds, so there are two fallback knobs (web config
-        # panel), not one: Variables.speed for fixedwing/quadplane bots,
-        # Variables.copter_speed for copter/ground bots -- used only for
-        # whichever drone didn't yield a usable detected value (param
-        # not downloaded, implausible, vehicle missing).
-        speeds = [
-            s
-            if s is not None
-            else (
-                self.Variables.copter_speed
-                if vtype != "fixedwing"
-                else self.Variables.speed
-            )
-            for s, vtype in zip(vehicle.speeds, vehicle.vehicle_types)
-        ]
         self.s = sim.Simulation(
             vehicle_type=vehicle.vehicle_types,
             world_size=self.Variables.world_size,
-            speed=speeds,
-            bank_angle_deg=self.Variables.bank_angle_deg,
+            speed=self._resolve_bot_speeds(),
+            bank_angle_deg=self._resolve_bot_bank_angles(),
         )
         self.gui = self._make_gui()
         self.current_function = {
@@ -144,6 +125,60 @@ class Swarm:
         # Throttle for the debug line (Variables.debug_reposition).
         self._last_debug_time = {}
         self._last_idle_pump = 0.0
+
+    def _resolve_bot_speeds(self):
+        """Each bot's speed fallback -- used only for a drone whose own
+        vehicle didn't yield a real detected speed (vehicle.py's
+        per-drone WPNAV_SPEED/TRIM_ARSPD_CM detection always takes
+        priority when available). Reads Variables.speed/copter_speed
+        FRESH every call (not cached), so a web-config-panel edit is
+        picked up the next time this is called -- see _populate_sim().
+        """
+        return [
+            s
+            if s is not None
+            else (
+                self.Variables.copter_speed
+                if vtype != "fixedwing"
+                else self.Variables.speed
+            )
+            for s, vtype in zip(self.vehicle.speeds, self.vehicle.vehicle_types)
+        ]
+
+    def _resolve_bot_bank_angles(self):
+        """Each fixedwing bot's own real configured max bank angle
+        (vehicle.py's ROLL_LIMIT_DEG/LIM_ROLL_CD detection), falling
+        back to Variables.bank_angle_deg only when a drone's own
+        parameters didn't yield one. A bot that assumes a steeper bank
+        than its real aircraft can actually fly turns tighter/faster
+        than the real aircraft can match -- confirmed by observation:
+        the bot pulling ahead of its drone specifically during turns.
+        Ground/copter bots don't use bank angle at all (robot.py only
+        reads it for vehicle_type == 'fixedwing'), so their entry here
+        is irrelevant and left as the plain Variables default.
+        """
+        return [
+            bank if bank is not None else self.Variables.bank_angle_deg
+            for bank in self.vehicle.bank_angles
+        ]
+
+    def _populate_sim(self, positions, num_bots):
+        """Wraps Simulation._populate(): refreshes the sim's speed and
+        bank_angle_deg from Variables immediately before rebuilding
+        every bot, so editing speed/copter_speed/bank_angle_deg in the
+        web config panel takes effect on the very next mission command
+        (search/goal/split/specificsplit) -- _populate() already
+        destroys and recreates every bot from scratch each time it
+        runs, so there's nothing stale left over to carry a change
+        forward; the previous behaviour of requiring a full process
+        restart only existed because the sim's speed/bank_angle_deg
+        were set once at Simulation construction and never refreshed.
+        world_size still needs a restart: changing it means resizing
+        the world/coverage-grid themselves, not just re-tagging bots.
+        """
+        self.s.speed = self._resolve_bot_speeds()
+        self.s.bank_angle_deg = self._resolve_bot_bank_angles()
+        self.s._populate(positions=positions, num_bots=num_bots)
 
     def stopAction(self):
         """call_back_action handed to Thread.stop(): the list of things
@@ -578,29 +613,34 @@ class Swarm:
         # line_waypoint_guidance() always returns cmd.speed == b.max_speed,
         # and move()'s own clamp (np.clip/min against [min_speed,
         # max_speed]) is then a no-op on that same value -- so the actual
-        # displacement is always b.max_speed * step_size. The previous
-        # formula divided step_size BY b.max_speed, which cancelled it
-        # out completely: every bot advanced at the exact same
-        # bot_target_speed_mps-derived rate no matter its vehicle_type or
-        # detected speed. That was invisible while every bot shared one
-        # uniform configured speed (pre-hybrid-swarm); it's very visible
-        # now that copters and fixedwings genuinely differ -- this is
-        # what showed up as copter bots racing far ahead of their much
-        # slower real drones.
+        # displacement is always b.max_speed * step_size. step_size is
+        # tick_interval_s directly: the bot advances at EXACTLY its own
+        # real detected speed, no reference to any other bot's or the
+        # swarm's shared config.
         #
-        # bot_target_speed_mps still gives the bot a deliberate speed
-        # margin over its OWN vehicle's cruise (so the lookahead target
-        # it computes keeps pulling the real vehicle forward instead of
-        # letting it catch up and stall), expressed as a ratio against
-        # Variables.speed -- the baseline bot_target_speed_mps was always
-        # tuned against -- and applied to each bot's own max_speed,
-        # instead of overriding it. For a uniform swarm where every
-        # bot's max_speed equals Variables.speed (the old, pre-hybrid
-        # case), this reduces to exactly the old formula's result.
-        lead_factor = (
-            self.Variables.bot_target_speed_mps / (self.Variables.speed or 1e-6) / 2.0
-        )
-        step_size = lead_factor * self.Variables.tick_interval_s
+        # An earlier version derived step_size from
+        # bot_target_speed_mps / Variables.speed (meant as a deliberate
+        # "lead" margin over the real vehicle's cruise). That's wrong for
+        # a hybrid swarm in two different ways, confirmed by actually
+        # running a bot against a simulated real drone and measuring the
+        # gap over time: dividing BY b.max_speed cancelled it out
+        # entirely (every bot moved at one identical absolute rate
+        # regardless of vehicle_type -- copter bots raced far ahead of
+        # their much slower real drones); fixing that to scale with
+        # b.max_speed but still dividing by the single Variables.speed
+        # (30) as the reference meant any bot whose own real speed
+        # DIFFERED from that one config value was STILL off -- a
+        # fixedwing with a real 22 m/s airspeed moved at only
+        # 22 * (40/30/2) = 14.7 m/s (67%), measured to fall behind its
+        # simulated drone by up to 100m every ~15s over a 60s run.
+        # Matching 1:1 removes that mismatch outright: there is no
+        # "reference speed" left to be wrong relative to.
+        #
+        # The existing dis > 100 / lead_state snap above (the real
+        # vehicle has pulled more than 100m ahead) is what actually
+        # protects against the bot falling behind, not a deliberate
+        # bot-leads-vehicle speed margin -- see its comment above.
+        step_size = self.Variables.tick_interval_s
         # step_size = step_size if not send_command else step_size * 2
         b.move(cmd.dir, cmd.speed, step_size=step_size)
 
@@ -611,13 +651,24 @@ class Swarm:
         # was placing tx,ty on the wrong side of the turn and forcing
         # the real vehicle into a sudden small-radius intercept turn.
 
+        # Hybrid swarm: how far ahead of the bot the REAL vehicle's
+        # commanded target sits has to match that vehicle's own scale --
+        # a fixedwing-sized lookahead (hundreds of metres,
+        # vehicle_loiter_radius_min_m) sent to a copter would command it
+        # toward a point it could take minutes to reach even though its
+        # own bot was already there.
+        lookahead_m = (
+            self.Variables.vehicle_loiter_radius_min_m
+            if b.vehicle_type == "fixedwing"
+            else self.Variables.copter_lookahead_m
+        )
         tx, ty = compute_lookahead_target(
             x,
             y,
             theta,
             rx,
             ry,
-            self.Variables.vehicle_loiter_radius_min_m,
+            lookahead_m,
         )
         lead_lat, lead_lon = cartToGeo(
             self.Variables.origin,
@@ -655,7 +706,7 @@ class Swarm:
                         f"bot {i+1}: cmd ({lead_lat:.6f}, {lead_lon:.6f}) "
                         f"| drone ({frame.lat:.6f}, {frame.lon:.6f}) alt {frame.alt:.0f} "
                         f"| bot->drone {b.dist(rx, ry) * 2:.0f}m "
-                        f"| lead {self.Variables.vehicle_loiter_radius_min_m:.0f}m"
+                        f"| lead {lookahead_m:.0f}m"
                     )
 
         return tx, ty
@@ -689,7 +740,7 @@ class Swarm:
             origin=self.Variables.origin,
             endDistance=self.Variables.endDistance,
         )
-        self.s._populate(positions=pos, num_bots=len(self.vehicle.drones))
+        self._populate_sim(pos, len(self.vehicle.drones))
         # _populate() rebuilds every bot unfrozen; re-freeze the removed
         # ones so they don't read as active on the plot.
         for i in range(len(self.s.swarm)):
@@ -842,7 +893,7 @@ class Swarm:
             # Only here, because _populate() DESTROYS and re-creates
             # every bot -- doing that on each command would wipe the
             # goal sequence and pose of the bots other jobs are flying.
-            self.s._populate(positions=pos, num_bots=len(self.vehicle.drones))
+            self._populate_sim(pos, len(self.vehicle.drones))
 
         # Snap just THIS command's bots onto their drone's live x,y (and
         # heading) every time, so a new leg always starts from where the
@@ -999,7 +1050,7 @@ class Swarm:
             origin=self.Variables.origin,
             endDistance=self.Variables.endDistance,
         )
-        self.s._populate(positions=pos, num_bots=len(self.vehicle.drones))
+        self._populate_sim(pos, len(self.vehicle.drones))
         # _populate() rebuilds every bot unfrozen; re-freeze the removed
         # ones so they don't read as active on the plot.
         for i in range(len(self.s.swarm)):
@@ -1139,7 +1190,7 @@ class Swarm:
             origin=self.Variables.origin,
             endDistance=self.Variables.endDistance,
         )
-        self.s._populate(positions=pos, num_bots=len(self.vehicle.drones))
+        self._populate_sim(pos, len(self.vehicle.drones))
 
         for i in range(len(self.s.swarm)):
             if (i + 1) in self.removed_bots:
