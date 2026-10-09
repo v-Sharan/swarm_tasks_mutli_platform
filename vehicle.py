@@ -127,6 +127,22 @@ class Vehicles:
             print(f"Drone {index} failed: {e} ({conn_string})")
 
     def Loiter_param(self):
-        return max(
-            (drone.parameters["WP_LOITER_RAD"] for drone in self.drones), default=None
-        )
+        """Largest WP_LOITER_RAD among the connected drones that actually
+        have it.
+
+        WP_LOITER_RAD is an ArduPlane-only parameter -- ArduCopter has no
+        such parameter at all, so indexing vehicle.parameters["WP_LOITER_RAD"]
+        on a copter raises KeyError (dronekit's Parameters.__getitem__
+        looks it up in the vehicle's own reported param set). In a hybrid
+        swarm that's a real combination now, not a hypothetical one, so
+        this uses .get() (falls back to the dict-like default, None,
+        instead of raising) and filters those Nones out before taking
+        the max -- an all-copter swarm correctly returns None, same as
+        before when nothing had the parameter at all.
+        """
+        radii = [
+            r
+            for r in (drone.parameters.get("WP_LOITER_RAD") for drone in self.drones)
+            if r is not None
+        ]
+        return max(radii, default=None)
