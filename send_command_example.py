@@ -27,6 +27,7 @@ import time
 
 DEFAULT_PORT = 12008
 
+
 class SwarmClient:
     """Thin UDP sender -- one datagram per command."""
 
@@ -100,7 +101,9 @@ class SwarmClient:
             f"_{json.dumps(grid_space)}_{json.dumps(coverage_area)}"
         )
 
-    def specific_split(self, center_lat_lon_array, uav_array, grid_space, coverage_area):
+    def specific_split(
+        self, center_lat_lon_array, uav_array, grid_space, coverage_area
+    ):
         """Specific-split mission: uav_array is a list of per-area id
         lists (e.g. [[1,2], [3,4]]), one sub-list per entry in
         center_lat_lon_array -- lets you hand-pick which bots cover
@@ -124,7 +127,7 @@ if __name__ == "__main__":
     # Replace with the IP main.py printed at startup ("Ip address: ...").
     # NOT 127.0.0.1/localhost -- main.py binds its UDP listener to the
     # machine's real LAN IP, not the loopback interface.
-    SWARM_HOST = "192.168.199.117"
+    SWARM_HOST = "192.168.31.15"
 
     client = SwarmClient(SWARM_HOST)
     try:
@@ -132,15 +135,15 @@ if __name__ == "__main__":
         # to hold position (self-heal) a moment later.
         # client.stop()
         # time.sleep(2)
-        # client.search(
-        #     center_lat=12.9595609,
-        #     center_lon=80.0387478,
-        #     num_uavs=10,
-        #     grid_space=100,
-        #     coverage_area=2000,
-        # )
+        client.search(
+            center_lat=12.9595609,
+            center_lon=80.0387478,
+            num_uavs=10,
+            grid_space=100,
+            coverage_area=2000,
+        )
         # time.sleep(240)
-        client.goal(goal_latlon=[[12.9483525,80.0587463],[12.9595609,80.0387478],[12.9707692,80.0187492]],direction=1,radius=100,ids=["01","02","08","09"])
+        # client.goal(goal_latlon=[[12.9483525,80.0587463],[12.9595609,80.0387478],[12.9707692,80.0187492]],direction=1,radius=100,ids=["01","02","08","09"])
         # client.add(3)
         # client.stop()
     finally:
