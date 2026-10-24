@@ -26,7 +26,7 @@ def opposite_deg(heading):
     return (heading + 180) % 360
 
 
-def lookahead_point(x, y, theta, distance=10):
+def lookahead_point(x, y, theta, distance):
     lx = x + distance * cos(theta)
     ly = y + distance * sin(theta)
     return (lx, ly)

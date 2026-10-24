@@ -86,6 +86,7 @@ class Bot:
         # Goal (weight given to goal in potential field)
         self.goal_given = False
         self.goal = [0, 0]
+        self.step_size = 0.1
 
         # Ordered queue of waypoints still to visit *after* the current
         # goal, e.g. loaded from a CSV via utils.waypoints.load_goals_csv()
@@ -96,17 +97,41 @@ class Bot:
         self.goal_queue = []
 
         # Sticky "stop" flag: True once this bot has been frozen after
-        # reaching a goal (see stop_if_reached()). reached_goal() is a
-        # live distance check that can flicker True/False as the bot
-        # orbits or overshoots; `done` is the one-shot latch that
-        # actually halts computation/movement for this bot specifically,
-        # while the rest of the swarm keeps going. Cmd.exec() (see
-        # controllers/command.py) checks this and no-ops when True, so
-        # every existing task/example loop gets the freeze for free just
-        # by continuing to call cmd.exec(bot) each frame. set_goal()
-        # clears it automatically, so assigning a new goal always wakes
-        # the bot back up.
-        self.done = False
+        # reaching a goal (see stop_if_reached()), OR before it's ever
+        # been given one. reached_goal() is a live distance check that
+        # can flicker True/False as the bot orbits or overshoots;
+        # `done` is the one-shot latch that actually halts computation/
+        # movement for this bot specifically, while the rest of the
+        # swarm keeps going. Cmd.exec() (see controllers/command.py)
+        # checks this and no-ops when True, so every existing task/
+        # example loop gets the freeze for free just by continuing to
+        # call cmd.exec(bot) each frame. set_goal() clears it
+        # automatically, so assigning a new goal always wakes the bot
+        # back up.
+        #
+        # Starts True (not False): a bot with goal_exists()==False
+        # falls through line_waypoint_guidance()'s very first check to
+        # `Cmd(dir_=bot.theta, speed=bot.max_speed)` -- a NONZERO
+        # speed, same heading it already had -- and unless `done` is
+        # already True, Cmd.exec() isn't a no-op, so that command
+        # actually gets applied: a bot that was never assigned a goal
+        # at all would otherwise fly straight ahead at full speed
+        # forever (confirmed directly: an un-goaled bot advanced every
+        # single tick, no different from one mid-route). This matters
+        # beyond just the sim -- swarm.py's per-tick loops call
+        # send_reposition() right along with it, so a real connected
+        # vehicle that a mission command didn't happen to select (e.g.
+        # more vehicles connected than effective_num_uavs/
+        # selected_uav_ids covered) would be actively flown via
+        # MAV_CMD_DO_REPOSITION toward an ever-receding point in
+        # whatever direction it happened to be facing at populate time
+        # -- with nothing ever telling it to stop, since freezing only
+        # ever happens on ARRIVAL and a bot with no goal can never
+        # arrive anywhere. Starting frozen instead means a bot only
+        # ever moves once something has actually given it somewhere to
+        # go -- set_goal()/set_goal_sequence() still immediately un-
+        # freeze it exactly as before.
+        self.done = True
 
         # Loiter state (used by guided waypoint navigation for fixedwing bots,
         # see controllers/guided.py's _orbit_cmd()/loiter_radius handling).
@@ -286,9 +311,9 @@ class Bot:
 
         return neighbours
 
-    def step(self, step_size=0.05):
-        x_ = self.x + step_size * np.cos(self.theta)
-        y_ = self.y + step_size * np.sin(self.theta)
+    def step(self, distance):
+        x_ = self.x + distance * np.cos(self.theta)
+        y_ = self.y + distance * np.sin(self.theta)
 
         if self.sim.check_free(
             x_, y_, self.size + 0.01, ignore=self
@@ -320,7 +345,7 @@ class Bot:
         while self.theta < 0:
             self.theta += 2 * np.pi
 
-    def move(self, direction, speed, step_size=0.08):
+    def move(self, direction, speed):
         """
         The robot moves one step in the given direction
         The size of step os step_size*speed
@@ -328,32 +353,45 @@ class Bot:
 
         'ground'/copter bots: omnidirectional, like a real multirotor --
         it doesn't need to face its direction of travel before it can
-        move there. Always translates forward at a speed clamped to
+        move there (already true of movement, below) and its YAW isn't
+        bank-angle-limited the way a fixed-wing's heading is, so theta
+        snaps directly to `direction` every tick instead of being rate-
+        limited. Always translates forward at a speed clamped to
         [0, max_speed] (it CAN slow to a stop/hover, unlike a
-        fixedwing), while the heading turns toward `direction` at a
-        rate bounded by max_turn_speed, purely for a readable heading
-        arrow on the plot -- it never gates movement.
+        fixedwing).
 
         'fixedwing' bots: cannot stop or pivot in place. Every step it
         translates forward at a speed clamped to [min_speed, max_speed],
         while the heading turns toward `direction` at a rate bounded by
         max_turn_speed (a Dubins-car / bank-limited-turn approximation of
-        fixed-wing flight).
+        fixed-wing flight) -- a real physical constraint, unlike a
+        copter's heading.
 
-        An earlier version of the ground/copter branch pivoted in place
-        (skipped translating entirely) whenever the needed heading
-        correction was large, using a buggy threshold that compared the
-        correction (an angle) directly against max_turn_speed (a rate,
-        rad/s) with no *step_size -- so it pivoted by up to a full
-        max_turn_speed radians in ONE tick (far more than the configured
-        rate actually allows) and moved 0m that tick. Harmless for a
-        bot flying alone (it reaches the right heading in 1-2 ticks
-        either way), but under avoid_bots repulsion from a nearby bot
-        the commanded direction itself shifts by a similar amount tick
-        to tick -- confirmed by reproducing it directly: a bot stuck
-        re-aiming at a moving target for 259 of 300 ticks, 0m net
-        progress toward its goal. That's what showed up as a bot
-        "loitering" near one point instead of advancing to the next.
+        An earlier version rate-limited theta for ground/copter bots
+        too, "purely for a readable heading arrow" -- but a real copter
+        doesn't carve a turn radius between legs the way a fixed-wing
+        does (WPNAV_SPEED's cornering is jerk-limited deceleration/
+        acceleration, not a geometric arc), and even though that rate
+        limit never gated movement (fixed separately, see below), the
+        heading arrow still visibly swung through what looked like a
+        turn over several seconds -- visible on the plot as the copter
+        bot appearing to arc between waypoints instead of cornering
+        sharply like its real vehicle does.
+
+        A version before THAT pivoted in place (skipped translating
+        entirely) whenever the needed heading correction was large,
+        using a buggy threshold that compared the correction (an angle)
+        directly against max_turn_speed (a rate, rad/s) with no
+        *step_size -- so it pivoted by up to a full max_turn_speed
+        radians in ONE tick (far more than the configured rate actually
+        allows) and moved 0m that tick. Harmless for a bot flying alone
+        (it reaches the right heading in 1-2 ticks either way), but
+        under avoid_bots repulsion from a nearby bot the commanded
+        direction itself shifts by a similar amount tick to tick --
+        confirmed by reproducing it directly: a bot stuck re-aiming at
+        a moving target for 259 of 300 ticks, 0m net progress toward
+        its goal. That's what showed up as a bot "loitering" near one
+        point instead of advancing to the next.
         """
         turn_angle = direction - self.theta
         while turn_angle >= np.pi:
@@ -361,17 +399,17 @@ class Bot:
         while turn_angle <= -np.pi:
             turn_angle += 2 * np.pi
 
-        max_turn_this_step = self.max_turn_speed * step_size
-        turn_step = np.clip(turn_angle, -max_turn_this_step, max_turn_this_step)
-        self.turn(turn_step)
-
         if self.vehicle_type == "fixedwing":
+            max_turn_this_step = self.max_turn_speed * self.step_size
+            turn_step = np.clip(turn_angle, -max_turn_this_step, max_turn_this_step)
+            self.turn(turn_step)
             # Cannot stop/hover: speed is clamped to [min_speed, max_speed]
             cmd_speed = np.clip(speed, self.min_speed, self.max_speed)
         else:
+            self.turn(turn_angle)
             # Can slow to a stop/hover, but never commanded backwards
             cmd_speed = np.clip(speed, 0.0, self.max_speed)
-        self.step(cmd_speed * step_size)
+        self.step(cmd_speed * self.step_size)
 
     def unstuck(self, r):
         """

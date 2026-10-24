@@ -12,7 +12,8 @@ if __name__ == "__main__":
     try:
         callBack = CallBack()
         print("Callback")
-        ip = NetworkIP.get_ip()
+        # ip = NetworkIP.get_ip()
+        ip = "192.168.199.117"
         print(f"Ip address: {ip}")
         vehicles = Vehicles(
             [

@@ -34,7 +34,6 @@ def _coerce(current, raw):
     return raw
 
 
-
 class Variables:
     def __init__(
         self,
@@ -49,15 +48,27 @@ class Variables:
 
         self.origin = read_origin()
         self.world_size = world_size
-        # Fallback cruise speed (m/s) used ONLY when a bot's own real
-        # vehicle didn't yield a usable detected speed (vehicle.py reads
-        # TRIM_ARSPD_CM for fixedwing/quadplane, WPNAV_SPEED for copter
-        # -- see swarm.py's Swarm.__init__) -- one per vehicle_type,
-        # since a hybrid swarm's copters and fixedwings genuinely cruise
-        # at very different speeds and a single shared fallback would be
-        # wrong for whichever type it wasn't tuned for.
-        self.speed = speed  # fixedwing/quadplane fallback
-        self.copter_speed = copter_speed  # copter/ground fallback
+
+        self.speed = speed  # fixedwing/quadplane bot speed
+        self.copter_speed = copter_speed  # copter/ground bot speed
+
+        self.lead_speed_boost = 5.0
+        # Hard-resync distance (metres): once bot<->drone separation
+        # exceeds this AND the drone has moved ahead of the bot
+        # (lead_state), swarm.py gives up trying to guide the bot back
+        # gradually and just teleports it onto the drone's real
+        # position -- the gap's too big to close smoothly. See
+        # chase_sep_m below for the other direction (bot too far
+        # ahead), which is handled by slowing down instead.
+        self.resync_sep_m = 100.0
+        # Separation (metres) beyond which the BOT (not the drone) is
+        # judged too far ahead -- swarm.py ramps the bot's speed down
+        # from its normal cruise at this distance to a floor at
+        # resync_sep_m, so the real drone gets a chance to close the
+        # gap and both keep moving together/simultaneously, instead of
+        # the bot continuing to pull away on its own until a hard
+        # resync is the only option. Must stay below resync_sep_m.
+        self.chase_sep_m = 40.0
         self.bank_angle_deg = bank_angle_deg
         # Lookahead distance (metres) ahead of a FIXEDWING bot that
         # compute_lookahead_target() projects the real MAVLink

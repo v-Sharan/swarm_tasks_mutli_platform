@@ -130,16 +130,18 @@ if __name__ == "__main__":
     try:
         # Demo: kick off a 10-drone area-coverage search, then tell bot 3
         # to hold position (self-heal) a moment later.
-        client.stop()
-        time.sleep(2)
-        client.search(
-            center_lat=12.9250554,
-            center_lon=80.0533390,
-            num_uavs=6,
-            grid_space=100,
-            coverage_area=1000,
-        )
-        # client.remove(3)
+        # client.stop()
+        # time.sleep(2)
+        # client.search(
+        #     center_lat=12.9595609,
+        #     center_lon=80.0387478,
+        #     num_uavs=10,
+        #     grid_space=100,
+        #     coverage_area=2000,
+        # )
+        # time.sleep(240)
+        client.goal(goal_latlon=[[12.9483525,80.0587463],[12.9595609,80.0387478],[12.9707692,80.0187492]],direction=1,radius=100,ids=["01","02","08","09"])
+        # client.add(3)
         # client.stop()
     finally:
         client.close()

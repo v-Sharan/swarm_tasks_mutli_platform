@@ -21,7 +21,12 @@ Caveats it enforces rather than hides:
     until restart, so it's flagged, not silently accepted. A restart
     DOES pick up the saved value, since it's re-applied before the
     Simulation is built.
-  * speed/copter_speed/bank_angle_deg are picked up the next time a
+  * speed/copter_speed are live for the simulated bot -- Swarm's
+    _guide_and_reposition() re-reads Variables every tick, so an edit
+    takes effect mid-mission, not just on the next command. They
+    always override the bot's speed, even over a drone's own detected
+    cruise speed, and never change the real vehicle's own flight
+    speed. bank_angle_deg is still picked up only the next time a
     mission command runs (search/goal/split/specificsplit) -- Swarm's
     _populate_sim() re-reads Variables fresh right before each one
     destroys and rebuilds every bot, which already happens on every
@@ -50,12 +55,23 @@ UNUSED = set()
 NOTES = {
     "origin": "lat, lon of the local frame -- read from rectangles.yaml at startup",
     "world_size": "sim world in metres",
-    "speed": "fixedwing/quadplane cruise (m/s) -- fallback ONLY for a bot "
-    "whose own vehicle didn't report a usable detected speed. Applies on "
-    "the next search/goal/split command, not mid-mission",
-    "copter_speed": "copter/ground cruise (m/s) -- same fallback role as "
-    "'speed', for copter bots instead of fixedwing ones. Also applies on "
-    "the next mission command",
+    "speed": "fixedwing/quadplane BOT cruise (m/s) -- always overrides the "
+    "simulated bot's speed, even over a drone's own detected speed. Does "
+    "NOT change the real vehicle's flight speed. Live mid-mission, not "
+    "just on the next command",
+    "copter_speed": "copter/ground BOT cruise (m/s) -- same role as "
+    "'speed', for copter bots instead of fixedwing ones. Live mid-mission",
+    "lead_speed_boost": "extra speed (m/s) ADDED on top of speed/"
+    "copter_speed whenever the real drone has moved ahead of the bot, so "
+    "the bot can re-open its lead instead of getting walked down. Live, "
+    "per-tick -- drops back to normal the moment the bot is back in front",
+    "chase_sep_m": "separation (metres) beyond which the BOT is judged too "
+    "far ahead of the drone -- speed ramps down from here to a floor at "
+    "resync_sep_m so both keep moving together. Must stay below "
+    "resync_sep_m",
+    "resync_sep_m": "separation (metres) at which swarm.py gives up and "
+    "teleports the bot onto the drone's real position, instead of guiding "
+    "it back gradually -- only when the DRONE is the one ahead",
     "bank_angle_deg": "max bank angle (degrees) -- fallback ONLY for a "
     "fixedwing bot whose own vehicle didn't report ROLL_LIMIT_DEG/"
     "LIM_ROLL_CD. Applies on the next mission command",

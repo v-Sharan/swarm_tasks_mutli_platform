@@ -17,7 +17,8 @@ from time import time
 import random
 from swarm_tasks.mission.groupsplitauto import AutoSplitMission
 from swarm_tasks.mission.groupsplitspecific import SpecificSplitMission
-from math import sin, cos
+from swarm_tasks.telemetry_log import setup_swarm_logger
+from math import sin, cos, pi
 
 
 class _NullAxes:
@@ -73,6 +74,12 @@ class Swarm:
         self.num_bots = num_bots
         self.Variables = Variables
         self.vehicle = vehicle
+        # Persistent per-run log (~/Documents/swarm_env/logs/<run_id>.log)
+        # of every bot's guidance state, tick by tick -- see
+        # telemetry_log.py. Always on, independent of debug_reposition
+        # (console-only). This is what to check when a live run looks
+        # wrong and the cause isn't obvious from the plot alone.
+        self.log = setup_swarm_logger(self.Variables.run_id)
         # Hybrid swarm: each bot gets the kinematics matching its OWN
         # connected drone (vehicle.vehicle_types, auto-detected per-drone
         # from its MAVLink HEARTBEAT in vehicle.py) instead of forcing
@@ -127,22 +134,22 @@ class Swarm:
         self._last_idle_pump = 0.0
 
     def _resolve_bot_speeds(self):
-        """Each bot's speed fallback -- used only for a drone whose own
-        vehicle didn't yield a real detected speed (vehicle.py's
-        per-drone WPNAV_SPEED/TRIM_ARSPD_CM detection always takes
-        priority when available). Reads Variables.speed/copter_speed
-        FRESH every call (not cached), so a web-config-panel edit is
-        picked up the next time this is called -- see _populate_sim().
+        """Each bot's speed -- always taken from the web-config-panel
+        fields Variables.speed (fixedwing) / Variables.copter_speed
+        (ground/copter), by request, even for a drone whose own real
+        vehicle reported a detected cruise speed (vehicle.py's
+        per-drone WPNAV_SPEED/TRIM_ARSPD_CM detection -- still used
+        elsewhere, e.g. loiter/bank-angle, just not for this). Reads
+        Variables.speed/copter_speed FRESH every call (not cached), so
+        a web-config-panel edit is picked up the next time this is
+        called -- see _populate_sim(). This only changes the
+        SIMULATED bot's kinematics -- the real vehicle's own flight
+        speed is untouched (send_reposition() never sends a
+        groundspeed).
         """
         return [
-            s
-            if s is not None
-            else (
-                self.Variables.copter_speed
-                if vtype != "fixedwing"
-                else self.Variables.speed
-            )
-            for s, vtype in zip(self.vehicle.speeds, self.vehicle.vehicle_types)
+            self.Variables.copter_speed if vtype != "fixedwing" else self.Variables.speed
+            for vtype in self.vehicle.vehicle_types
         ]
 
     def _resolve_bot_bank_angles(self):
@@ -290,6 +297,63 @@ class Swarm:
         without knowing anything about per-bot jobs."""
         threads = [job["thread"] for job in self.goal_jobs]
         self.current_function["goal"] = [bool(threads), threads]
+
+    @staticmethod
+    def _avoid_sep_for_type(vtype):
+        """Same type-based bot-bot separation _guide_and_reposition()
+        uses for avoid_min_sep/avoid_radius -- pulled out here too so
+        _formation_offsets() can size a goal-command formation ring
+        against the exact same numbers, instead of duplicating (and
+        risking drifting out of sync with) the constants."""
+        return 100.0 if vtype == "fixedwing" else 15.0
+
+    def _formation_offsets(self, owned):
+        """Per-bot (dx, dy) spacing offset (metres) for a goal() command
+        shared across multiple bot ids.
+
+        Swarm.goal() hands every id in `owned` the SAME goal_latlon
+        sequence -- harmless for a single bot, but for more than one it
+        means they'd all be told to converge on the literal identical
+        coordinate. avoid_bots' own avoid_min_sep then makes that
+        geometrically impossible: closing in on one shared point
+        necessarily puts them well inside min_sep of each other, so
+        each bot's lookahead target keeps getting pushed away by the
+        other two and they just orbit the shared point forever,
+        never actually arriving -- confirmed as the cause of "copters
+        stuck, can't reach the goal" when several share one point.
+
+        No real multirotor/aircraft can occupy the same spot anyway,
+        so this spreads them into a small ring around the shared
+        point instead: every bot gets a fixed offset added to EVERY
+        waypoint in its own copy of the route, so they fly the same
+        path shape as a tight formation rather than literally stacked
+        on each other. The ring's radius is sized so adjacent bots in
+        it already clear every involved vehicle's own avoid_min_sep
+        with margin, so the avoidance system never has to fight the
+        formation itself to hold it.
+
+        Returns {swarm_index: (dx, dy)}, all (0.0, 0.0) when `owned`
+        has 0 or 1 bots -- nothing to spread apart.
+        """
+        n = len(owned)
+        if n <= 1:
+            return {i: (0.0, 0.0) for i in owned}
+        max_sep = max(
+            self._avoid_sep_for_type(
+                self.vehicle.vehicle_types[i]
+                if i < len(self.vehicle.vehicle_types)
+                else "ground"
+            )
+            for i in owned
+        )
+        # Adjacent points on an n-point ring of radius R are
+        # 2*R*sin(pi/n) apart -- solve for R so that clears max_sep
+        # with a 30% margin.
+        radius = 1.3 * max_sep / (2.0 * sin(pi / n))
+        return {
+            i: (radius * cos(2 * pi * k / n), radius * sin(2 * pi * k / n))
+            for k, i in enumerate(owned)
+        }
 
     def _assign(self, index, points):
         """Give a bot a goal list and remember it, so remove_bot() can
@@ -564,9 +628,89 @@ class Swarm:
         dis = b.dist(rx, ry)
         along = (rx - x) * cos(theta) + (ry - y) * sin(theta)
         lead_state = True if along > 0 else False
-        if dis > 100 and lead_state:
+
+        # Route already finished -- either frozen in place (ground/
+        # copter) or orbiting the last waypoint (fixedwing's
+        # b.loitering, since it can't hover). Either way there's no
+        # more progress to make along a route, so none of the
+        # lead/chase/resync machinery below -- which exists purely to
+        # help the bot and the real drone close a gap and keep moving
+        # TOGETHER along one -- applies anymore. Confirmed this
+        # matters for loitering too, not just frozen: while loitering,
+        # the bot's (x,y,theta) keep revolving around the loiter
+        # center, so the normal lookahead carrot (projected `along`
+        # the bot's current, constantly-rotating heading) sweeps
+        # around with it and never settles -- the real drone chases a
+        # point that outruns it, the gap blows past resync_sep_m, and
+        # snap_resync fires over and over (teleporting the bot off its
+        # own loiter circle each time) instead of the vehicle just
+        # holding a stable orbit.
+        already_finished = b.done
+
+        if not already_finished and dis > self.Variables.resync_sep_m and lead_state:
+            self.log.info(
+                f"bot={i+1} type={b.vehicle_type} EVENT=snap_resync "
+                f"bot_pos=({x:.1f},{y:.1f}) drone_pos=({rx:.1f},{ry:.1f}) "
+                f"dist={dis:.1f}m goal={b.goal if b.goal_given else None}"
+            )
             b.x, b.y = rx, ry
             return None, None
+
+        if not already_finished:
+            # Keep the bot's speed live-tunable from the web config panel
+            # WHILE a mission is already running, not just on the next
+            # search/goal/split command -- _populate_sim() only re-resolves
+            # speed when a NEW mission command repopulates every bot from
+            # scratch, so a bot already mid-route never saw a panel edit
+            # take effect until that happened. Variables.speed/copter_speed
+            # ALWAYS wins for the bot's speed, by request, even for a bot
+            # whose real vehicle has its own detected cruise speed -- this
+            # only changes the SIMULATED bot's kinematics, never the real
+            # vehicle's own flight speed (send_reposition() never sends a
+            # groundspeed).
+            panel_speed = (
+                self.Variables.copter_speed
+                if b.vehicle_type != "fixedwing"
+                else self.Variables.speed
+            )
+            # The real drone has moved ahead of the bot along the bot's own
+            # heading (lead_state, computed above from `along`) -- it's
+            # catching up to or passing the point it's supposed to be
+            # chasing, so bump the bot's speed to re-open its lead instead
+            # of just letting the drone walk it down every tick this keeps
+            # happening.
+            if lead_state:
+                panel_speed += self.Variables.lead_speed_boost
+            elif dis > self.Variables.chase_sep_m:
+                # The BOT is the one too far ahead this time (the drone
+                # hasn't passed it, but the gap is past chase_sep_m) --
+                # both have to keep moving simultaneously, not just the
+                # bot racing off on its own, so ramp its speed down toward
+                # a floor the closer `dis` gets to the hard resync distance
+                # (resync_sep_m), giving the real drone room to close the
+                # gap on its own. The floor respects each vehicle's own
+                # nature: a copter can genuinely hover, so it's allowed
+                # down to a full stop; a fixedwing can never stop or pivot
+                # in place, so it keeps at least half cruise speed even at
+                # its slowest -- it still closes the gap, just slower,
+                # rather than stalling.
+                span = max(self.Variables.resync_sep_m - self.Variables.chase_sep_m, 1e-6)
+                frac_over = min((dis - self.Variables.chase_sep_m) / span, 1.0)
+                floor_frac = 0.5 if b.vehicle_type == "fixedwing" else 0.0
+                panel_speed *= 1.0 - frac_over * (1.0 - floor_frac)
+            if b.max_speed != panel_speed:
+                b.max_speed = panel_speed
+                if b.vehicle_type == "fixedwing":
+                    b.min_speed = panel_speed
+
+        # Pre-guidance snapshot, to log a discrete EVENT line below if
+        # this tick advances the goal queue, starts loitering, or
+        # finishes the route -- the state line alone (logged every
+        # reposition cycle) shows WHAT a bot was doing at a given
+        # instant, these show the exact tick something CHANGED.
+        prev_goal = b.goal
+        prev_loitering = b.loitering
+        prev_done = b.done
 
         # Hybrid swarm: each bot's own real vehicle configuration, not
         # one shared default for every type. vehicle.py's per-drone
@@ -595,81 +739,89 @@ class Swarm:
             loiter_radius = None
             capture_radius = radius or 50.0
 
+        # Hybrid swarm: how much separation to keep from other bots also
+        # has to match each vehicle's own scale. 100m is reasonable for
+        # a fast fixedwing with a wide turn radius, but applying it to a
+        # copter too creates a real deadlock: a copter whose route runs
+        # closer than 100m to another bot's (very plausible on a dense
+        # coverage grid -- this swarm's own missions use grid_space=100,
+        # right at that threshold) can never get within avoid_min_sep of
+        # its own goal without violating the separation constraint, so
+        # it just sits there forever, re-aiming at a goal it's
+        # geometrically forbidden from reaching. Confirmed directly:
+        # parallel routes 100-130m apart captured normally (0m closest
+        # approach); at 60m spacing the bot got permanently stuck 39m
+        # from its goal. A copter (hovers precisely, WPNAV_RADIUS is
+        # only ~2m) needs far less real separation than a fixedwing.
+        avoid_sep_m = self._avoid_sep_for_type(b.vehicle_type)
         cmd = line_waypoint_guidance(
             b,
             capture_radius=capture_radius,
             freeze_on_arrival=not b.done,
             avoid_bots=True,
             avoid_weight=30.0,
-            avoid_min_sep=100.0,
-            avoid_radius=100.0,
+            avoid_min_sep=avoid_sep_m,
+            avoid_radius=avoid_sep_m,
             loiter_radius=loiter_radius,
         )
-        # Hybrid swarm: the planner bot must advance at a rate
-        # proportional to ITS OWN vehicle's real cruise speed
-        # (b.max_speed) -- a copter's bot should move far slower than a
-        # fixedwing's, matching how differently they actually fly.
-        #
-        # line_waypoint_guidance() always returns cmd.speed == b.max_speed,
-        # and move()'s own clamp (np.clip/min against [min_speed,
-        # max_speed]) is then a no-op on that same value -- so the actual
-        # displacement is always b.max_speed * step_size. step_size is
-        # tick_interval_s directly: the bot advances at EXACTLY its own
-        # real detected speed, no reference to any other bot's or the
-        # swarm's shared config.
-        #
-        # An earlier version derived step_size from
-        # bot_target_speed_mps / Variables.speed (meant as a deliberate
-        # "lead" margin over the real vehicle's cruise). That's wrong for
-        # a hybrid swarm in two different ways, confirmed by actually
-        # running a bot against a simulated real drone and measuring the
-        # gap over time: dividing BY b.max_speed cancelled it out
-        # entirely (every bot moved at one identical absolute rate
-        # regardless of vehicle_type -- copter bots raced far ahead of
-        # their much slower real drones); fixing that to scale with
-        # b.max_speed but still dividing by the single Variables.speed
-        # (30) as the reference meant any bot whose own real speed
-        # DIFFERED from that one config value was STILL off -- a
-        # fixedwing with a real 22 m/s airspeed moved at only
-        # 22 * (40/30/2) = 14.7 m/s (67%), measured to fall behind its
-        # simulated drone by up to 100m every ~15s over a 60s run.
-        # Matching 1:1 removes that mismatch outright: there is no
-        # "reference speed" left to be wrong relative to.
-        #
-        # The existing dis > 100 / lead_state snap above (the real
-        # vehicle has pulled more than 100m ahead) is what actually
-        # protects against the bot falling behind, not a deliberate
-        # bot-leads-vehicle speed margin -- see its comment above.
-        step_size = self.Variables.tick_interval_s
-        # step_size = step_size if not send_command else step_size * 2
-        b.move(cmd.dir, cmd.speed, step_size=step_size)
+        cmd.exec(b)
+        if b.goal != prev_goal:
+            self.log.info(
+                f"bot={i+1} type={b.vehicle_type} EVENT=goal_advanced "
+                f"from={prev_goal} to={b.goal} queue_remaining={len(b.goal_queue)}"
+            )
+        if b.loitering and not prev_loitering:
+            self.log.info(
+                f"bot={i+1} type={b.vehicle_type} EVENT=loiter_started "
+                f"center={b.loiter_center} radius={loiter_radius}"
+            )
+        if b.done and not prev_done and not b.goal_queue and not b.loitering:
+            self.log.info(
+                f"bot={i+1} type={b.vehicle_type} EVENT=route_finished "
+                f"final_goal={b.goal}"
+            )
 
-        # cmd.dir -- the bearing guidance just computed for THIS tick --
-        # not the bot's pre-move theta, which is still the OLD leg's
-        # bearing right when the bot rotates onto a new line segment.
-        # Anchoring the lookahead projection to a stale heading is what
-        # was placing tx,ty on the wrong side of the turn and forcing
-        # the real vehicle into a sudden small-radius intercept turn.
+        if already_finished:
+            # Route's over -- command the real vehicle to hold at the
+            # actual finished point, not a carrot projected
+            # lookahead_m beyond it. compute_lookahead_target()'s
+            # whole point is to keep a vehicle that's still catching up
+            # making progress along the route; once there's no more
+            # route, that same formula just sends the vehicle sailing
+            # past the goal chasing a point that never gets any
+            # closer, which is the "drone keeps moving past the final
+            # waypoint" symptom -- and the growing bot<->drone distance
+            # from that overshoot is also what was spuriously
+            # triggering snap_resync above.
+            #
+            # Frozen (ground/copter, or a fixedwing leg that didn't
+            # need a loiter): hold at the bot's own fixed final
+            # position. Loitering (fixedwing): hold at the loiter
+            # CENTER instead of the bot's current (constantly
+            # revolving) position on the circle -- send_reposition
+            # below still passes the real loiter_radius, so the real
+            # aircraft orbits that fixed center on its own instead of
+            # chasing the sim bot's position around the circle.
+            lookahead_m = 0.0
+            if b.loitering and b.loiter_center is not None:
+                tx, ty = b.loiter_center
+            else:
+                tx, ty = b.x, b.y
+        else:
+            if b.vehicle_type == "fixedwing":
+                lookahead_m = self.Variables.vehicle_loiter_radius_min_m
+            else:
+                lookahead_m = self.Variables.copter_lookahead_m
 
-        # Hybrid swarm: how far ahead of the bot the REAL vehicle's
-        # commanded target sits has to match that vehicle's own scale --
-        # a fixedwing-sized lookahead (hundreds of metres,
-        # vehicle_loiter_radius_min_m) sent to a copter would command it
-        # toward a point it could take minutes to reach even though its
-        # own bot was already there.
-        lookahead_m = (
-            self.Variables.vehicle_loiter_radius_min_m
-            if b.vehicle_type == "fixedwing"
-            else self.Variables.copter_lookahead_m
-        )
-        tx, ty = compute_lookahead_target(
-            x,
-            y,
-            theta,
-            rx,
-            ry,
-            lookahead_m,
-        )
+            tx, ty = compute_lookahead_target(
+                x,
+                y,
+                theta,
+                rx,
+                ry,
+                lookahead_m,
+            )
+
         lead_lat, lead_lon = cartToGeo(
             self.Variables.origin,
             self.Variables.endDistance,
@@ -698,10 +850,20 @@ class Swarm:
             )
             self._last_reposition_time[i] = now
 
+            frame = self.vehicle.drones[i].location.global_relative_frame
+            self.log.info(
+                f"bot={i+1} type={b.vehicle_type} "
+                f"bot_pos=({b.x:.1f},{b.y:.1f}) goal={b.goal if b.goal_given else None} "
+                f"done={b.done} loitering={b.loitering} queue_remaining={len(b.goal_queue)} "
+                f"drone_pos=({rx:.1f},{ry:.1f}) dist_bot_drone={dis:.1f}m "
+                f"cmd_latlon=({lead_lat:.6f},{lead_lon:.6f}) drone_latlon=({frame.lat:.6f},{frame.lon:.6f}) "
+                f"alt={frame.alt:.0f} lookahead_m={lookahead_m:.1f} "
+                f"loiter_radius={loiter_radius} capture_radius={capture_radius:.1f} "
+                f"sent_loiter_radius={real_loiter_radius}"
+            )
             if getattr(self.Variables, "debug_reposition", False):
                 if now - self._last_debug_time.get(i, 0) >= 2.0:
                     self._last_debug_time[i] = now
-                    frame = self.vehicle.drones[i].location.global_relative_frame
                     print(
                         f"bot {i+1}: cmd ({lead_lat:.6f}, {lead_lon:.6f}) "
                         f"| drone ({frame.lat:.6f}, {frame.lon:.6f}) alt {frame.alt:.0f} "
@@ -935,11 +1097,27 @@ class Swarm:
         self.gui.run()
 
         def goalSub(goal_latlon, ids, stop_event):
+            # goal_latlon is the SAME sequence for every id in this one
+            # command -- spread the bots sharing it into a small
+            # formation ring (see _formation_offsets()) so they're not
+            # all told to converge on the literal identical coordinate,
+            # which avoid_bots' own avoid_min_sep would otherwise make
+            # impossible to actually reach (confirmed cause of multiple
+            # copters stuck circling one shared goal, never arriving).
+            offsets = self._formation_offsets(
+                [i for i in owned if 0 <= i < len(self.s.swarm)]
+            )
             for i in owned:
                 if not 0 <= i < len(self.s.swarm):
                     continue
                 print(f"Goal set to bot: {i+1}")
-                self._assign(i, goal_latlon)
+                dx, dy = offsets[i]
+                points = (
+                    goal_latlon
+                    if (dx, dy) == (0.0, 0.0)
+                    else [(gx + dx, gy + dy) for gx, gy in goal_latlon]
+                )
+                self._assign(i, points)
 
             while True:
                 # This job's OWN event, so stopping the goal for one set
