@@ -32,7 +32,7 @@ if __name__ == "__main__":
         receiver.start()
         vehicle_loiter_radius_min_m = vehicles.Loiter_param()
         variables = Variables(vehicle_loiter_radius_min_m=vehicle_loiter_radius_min_m)
-        ConfigServer(variables).start()
+        ConfigServer(variables=variables, host=ip).start()
         print(variables.vehicle_loiter_radius_min_m)
         variables.heights = [100 + i * 10 for i in range(len(vehicles.drones))]
         # Live-editable config panel. Same object Swarm holds, so an edit
