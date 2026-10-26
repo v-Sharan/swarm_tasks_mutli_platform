@@ -182,7 +182,7 @@ type MassOperationOptions<T = unknown, U = unknown> = {
   skipConfirmation?: boolean;
 };
 
-function performMassOperation<T, U>(
+export function performMassOperation<T, U>(
   {
     type,
     name,

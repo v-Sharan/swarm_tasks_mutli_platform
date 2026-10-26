@@ -32,14 +32,16 @@ if __name__ == "__main__":
         receiver.start()
         vehicle_loiter_radius_min_m = vehicles.Loiter_param()
         variables = Variables(vehicle_loiter_radius_min_m=vehicle_loiter_radius_min_m)
-        ConfigServer(variables=variables, host=ip).start()
         print(variables.vehicle_loiter_radius_min_m)
         variables.heights = [100 + i * 10 for i in range(len(vehicles.drones))]
-        # Live-editable config panel. Same object Swarm holds, so an edit
-        # lands on the workers' next tick -- no restart.
         swarm = Swarm(
             num_bots=len(vehicles.drones), Variables=variables, vehicle=vehicles
         )
+        # Live-editable config panel + read-only /api/telemetry for the GUI
+        # bridge. Same Variables object Swarm holds, so an edit lands on the
+        # workers' next tick -- no restart. Started only after swarm exists,
+        # since /api/telemetry reads it.
+        ConfigServer(variables=variables, host=ip, swarm=swarm).start()
         while True:
             # Matplotlib/Qt calls must happen on the main thread; searchSub()
             # (background thread) only publishes state for this to draw.

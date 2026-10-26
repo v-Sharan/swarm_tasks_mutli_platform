@@ -111,6 +111,76 @@ def _describe(variables):
     return fields
 
 
+def _telemetry(swarm):
+    """Read-only snapshot of live bot state for the GUI bridge to poll.
+
+    Reads the REAL vehicle's position (dronekit), not the simulator's
+    internal (x, y) -- that's what an operator actually wants to see.
+    Never raises for the response as a whole: a single bot's transient
+    dronekit attribute glitch (e.g. no heartbeat yet) lands as an
+    "error" entry for that bot instead of 500ing everything else.
+    """
+    drones = swarm.vehicle.drones
+    vehicle_types = swarm.vehicle.vehicle_types
+    sim_bots = swarm.s.swarm
+    goal_jobs = swarm.goal_jobs
+
+    bots = []
+    for i in range(len(drones)):
+        bot_id = str(i + 1)
+        try:
+            drone = drones[i]
+            frame = getattr(
+                getattr(drone, "location", None), "global_relative_frame", None
+            )
+            mode = getattr(drone, "mode", None)
+            battery = getattr(drone, "battery", None)
+
+            sim_bot = sim_bots[i] if i < len(sim_bots) else None
+            goal_queue = getattr(sim_bot, "goal_queue", None) if sim_bot else None
+
+            job = next(
+                (
+                    "goal"
+                    for entry in goal_jobs
+                    if bot_id in entry.get("ids", ())
+                ),
+                None,
+            )
+
+            bots.append(
+                {
+                    "id": bot_id,
+                    "vehicle_type": (
+                        vehicle_types[i] if i < len(vehicle_types) else None
+                    ),
+                    "removed": (i + 1) in swarm.removed_bots,
+                    "armed": getattr(drone, "armed", None),
+                    "mode": getattr(mode, "name", None),
+                    "lat": getattr(frame, "lat", None),
+                    "lon": getattr(frame, "lon", None),
+                    "alt": getattr(frame, "alt", None),
+                    "heading": getattr(drone, "heading", None),
+                    "battery_voltage": getattr(battery, "voltage", None),
+                    "done": getattr(sim_bot, "done", None) if sim_bot else None,
+                    "goal_given": (
+                        getattr(sim_bot, "goal_given", None) if sim_bot else None
+                    ),
+                    "loitering": (
+                        getattr(sim_bot, "loitering", None) if sim_bot else None
+                    ),
+                    "goal_queue_len": (
+                        len(goal_queue) if goal_queue is not None else None
+                    ),
+                    "job": job,
+                }
+            )
+        except Exception as exc:
+            bots.append({"id": bot_id, "error": str(exc)})
+
+    return {"running": [name for name, _ in swarm.running_funcs()], "bots": bots}
+
+
 PAGE = """<!doctype html>
 <meta charset="utf-8">
 <title>Swarm variables</title>
@@ -235,6 +305,7 @@ load();
 
 class _Handler(BaseHTTPRequestHandler):
     variables = None  # set by ConfigServer
+    swarm = None  # set by ConfigServer -- None until main.py passes one in
 
     def log_message(self, fmt, *args):
         """Silence the per-request stderr line -- it would bury the
@@ -257,6 +328,15 @@ class _Handler(BaseHTTPRequestHandler):
                 json.dumps(_describe(self.variables)),
                 "application/json",
             )
+        elif self.path == "/api/telemetry":
+            if self.swarm is None:
+                self._send(
+                    503,
+                    json.dumps({"error": "swarm not attached yet"}),
+                    "application/json",
+                )
+            else:
+                self._send(200, json.dumps(_telemetry(self.swarm)), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
@@ -320,15 +400,20 @@ class ConfigServer:
     # Firefox's hard-coded unsafe-port blocklist -- the browser refuses to
     # connect (ERR_UNSAFE_PORT / "This address is restricted") even though
     # the server is serving fine, which looks exactly like it never started.
-    def __init__(self, variables, host="127.0.0.1", port=8765):
+    def __init__(self, variables, host="127.0.0.1", port=8765, swarm=None):
         self.variables = variables
         self.host = host
         self.port = port
+        self.swarm = swarm
         self._httpd = None
         self._thread = None
 
     def start(self):
-        handler = type("_BoundHandler", (_Handler,), {"variables": self.variables})
+        handler = type(
+            "_BoundHandler",
+            (_Handler,),
+            {"variables": self.variables, "swarm": self.swarm},
+        )
         try:
             self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
         except OSError as exc:

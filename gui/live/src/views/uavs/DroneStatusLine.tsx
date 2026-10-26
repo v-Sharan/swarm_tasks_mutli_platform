@@ -19,6 +19,7 @@ import {
   getUAVById,
 } from '~/features/uavs/selectors';
 import { NULL_ISLAND, type GPSFix, type GPSPosition } from '~/model/geography';
+import { parseSwarmMode, vehicleTypeLabel } from '~/model/swarm-vehicle-type';
 import { UAVAge } from '~/model/uav';
 import {
   getPreferredCoordinateFormatter,
@@ -109,6 +110,9 @@ const useStyles = makeStyles((theme) => ({
   modePill: {
     width: 48,
   },
+  vehicleTypePill: {
+    width: 48,
+  },
   gpsPill: {
     width: 40,
     outline: 'none !important',
@@ -154,6 +158,7 @@ const DroneStatusLine = ({
 }: DroneStatusLineProps) => {
   const classes = useStyles();
   const { amsl, ahl, agl } = position;
+  const { vehicleType, activity } = parseSwarmMode(mode);
   return (
     <div className={clsx(classes.root, gone && classes.gone)}>
       {padStart(label, 5)}
@@ -170,10 +175,26 @@ const DroneStatusLine = ({
       )}
       {!missing && (
         <>
-          <FlightModeStatusPill
-            mode={mode}
-            className={clsx(classes.pill, classes.modePill)}
-          />
+          {vehicleType ? (
+            <>
+              <StatusPill
+                inline
+                status={Status.OFF}
+                className={clsx(classes.pill, classes.vehicleTypePill)}
+              >
+                {vehicleTypeLabel(vehicleType)}
+              </StatusPill>
+              <FlightModeStatusPill
+                mode={activity}
+                className={clsx(classes.pill, classes.modePill)}
+              />
+            </>
+          ) : (
+            <FlightModeStatusPill
+              mode={mode}
+              className={clsx(classes.pill, classes.modePill)}
+            />
+          )}
           <BatteryIndicator
             className={classes.batteryIndicator}
             formatter={batteryFormatter}

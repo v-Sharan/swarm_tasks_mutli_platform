@@ -9,6 +9,7 @@ import LayerSettingsDialog from './LayerSettingsDialog';
 import ServerSettingsDialog from './ServerSettingsDialog';
 import SessionExpiryDialog from './SessionExpiryDialog';
 import SubscriptionDialog from './SubscriptionDialog';
+import SwarmOpsDialog from './SwarmOpsDialog';
 import TimeSyncDialog from './TimeSyncDialog';
 
 const dialogs = {
@@ -22,6 +23,7 @@ const dialogs = {
   ServerSettingsDialog,
   SessionExpiryDialog,
   SubscriptionDialog,
+  SwarmOpsDialog,
   TimeSyncDialog,
 };
 

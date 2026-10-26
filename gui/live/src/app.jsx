@@ -166,6 +166,7 @@ const App = ({ onFirstRender }) => (
       <dialogs.LayerSettingsDialog />
       <dialogs.ServerSettingsDialog />
       {hasTimeLimitedSession && <dialogs.SessionExpiryDialog />}
+      <dialogs.SwarmOpsDialog />
       <dialogs.TimeSyncDialog />
 
       <ConsistencyCheckSetupDialog />

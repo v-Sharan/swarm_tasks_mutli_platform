@@ -55,6 +55,7 @@ import sessionReducer from '~/features/session/slice';
 import settingsReducer from '~/features/settings/slice';
 import showReducer from '~/features/show/slice';
 import sidebarReducer from '~/features/sidebar/slice';
+import swarmOpsReducer from '~/features/swarm-ops/slice';
 import threeDReducer from '~/features/three-d/slice';
 import uavControlReducer from '~/features/uav-control/slice';
 import uavReducer from '~/features/uavs/slice';
@@ -116,6 +117,7 @@ const reducer = combineReducers({
   settings: settingsReducer,
   show: showReducer,
   sidebar: sidebarReducer,
+  swarmOps: swarmOpsReducer,
   tasks: tasksReducer,
   threeD: threeDReducer,
   uavs: uavReducer,

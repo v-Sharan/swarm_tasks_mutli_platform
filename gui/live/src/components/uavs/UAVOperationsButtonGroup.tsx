@@ -5,11 +5,15 @@ import Explore from '@mui/icons-material/Explore';
 import PositionHold from '@mui/icons-material/Flag';
 import FlightLand from '@mui/icons-material/FlightLand';
 import FlightTakeoff from '@mui/icons-material/FlightTakeoff';
+import Hub from '@mui/icons-material/Hub';
 import Home from '@mui/icons-material/Home';
 import Moon from '@mui/icons-material/NightsStay';
+import PersonAddAlt from '@mui/icons-material/PersonAddAlt';
+import PersonRemove from '@mui/icons-material/PersonRemove';
 import PlayArrow from '@mui/icons-material/PlayArrow';
 import PowerSettingsNew from '@mui/icons-material/PowerSettingsNew';
 import Refresh from '@mui/icons-material/Refresh';
+import Stop from '@mui/icons-material/Stop';
 import WbSunny from '@mui/icons-material/WbSunny';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
@@ -32,6 +36,8 @@ import {
   createTaskOperationThunks,
   TASK_SPECS,
 } from '~/features/tasks';
+import { sendAddCommand, sendRemoveCommand, sendStopCommand } from '~/features/swarm-ops/actions';
+import { openSwarmOpsDialog } from '~/features/swarm-ops/slice';
 import {
   requestRemovalOfUAVsByIds,
   requestRemovalOfUAVsMarkedAsGone,
@@ -58,6 +64,7 @@ type Props = OwnProps & {
   compassCalibrationStatus: AggregatedTaskState;
   dispatch: AppDispatch;
   getTargetedUAVIds: (state: RootState) => string[];
+  openSwarmOpsDialog: () => void;
   openUAVDetailsDialog: (id: string) => void;
   requestRemovalOfUAVsByIds: (ids: string[]) => void;
   requestRemovalOfUAVsMarkedAsGone: () => void;
@@ -76,6 +83,7 @@ const UAVOperationsButtonGroup = ({
   dispatch,
   getTargetedUAVIds,
   hideSeparators,
+  openSwarmOpsDialog,
   openUAVDetailsDialog,
   requestRemovalOfUAVsByIds,
   requestRemovalOfUAVsMarkedAsGone,
@@ -364,6 +372,42 @@ const UAVOperationsButtonGroup = ({
           </Tooltip>
         </>
       )}
+
+      {!hideSeparators && <ToolbarDivider orientation='vertical' />}
+
+      <Tooltip content='Stop (global -- stops whatever the swarm is currently running)'>
+        <IconButton size={iconSize} onClick={() => sendStopCommand()}>
+          <Stop fontSize={fontSize} htmlColor={Colors.error} />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip content='Remove selected bot(s) from the swarm (self-heal)'>
+        <IconButton
+          disabled={isSelectionEmpty}
+          size={iconSize}
+          onClick={() => sendRemoveCommand(selectedUAVIds)}
+        >
+          <PersonRemove fontSize={fontSize} />
+        </IconButton>
+      </Tooltip>
+
+      <Tooltip content='Add selected bot(s) back to the swarm'>
+        <IconButton
+          disabled={isSelectionEmpty}
+          size={iconSize}
+          onClick={() => sendAddCommand(selectedUAVIds)}
+        >
+          <PersonAddAlt fontSize={fontSize} />
+        </IconButton>
+      </Tooltip>
+
+      {size !== 'small' && (
+        <Tooltip content='Swarm ops (search / split / specific split / heights / multi-waypoint goal)'>
+          <IconButton size={iconSize} onClick={openSwarmOpsDialog}>
+            <Hub fontSize={fontSize} />
+          </IconButton>
+        </Tooltip>
+      )}
     </>
   );
 };
@@ -392,6 +436,7 @@ export default connect(
   (dispatch) => ({
     ...bindActionCreators(
       {
+        openSwarmOpsDialog,
         openUAVDetailsDialog,
         requestRemovalOfUAVsMarkedAsGone,
         requestRemovalOfUAVsByIds,
