@@ -1,0 +1,38 @@
+/**
+ * @file File that re-exports all the individual views implemented in
+ * other files in this folder.
+ */
+
+import BeaconList from './beacons';
+import ClockDisplayList from './clocks';
+import ConnectionList from './connections';
+import DockList from './docks';
+import FeaturePanel from './features';
+import LayerList from './layers';
+import SavedLocationList from './locations';
+import LogPanel from './log';
+import MessagesPanelView from './messages';
+import MissionOverviewPanel from './mission-editor';
+import ThreeDTopLevelView from './three-d';
+import UAVDetailsPanel from './uav-details';
+import UAVList from './uavs';
+
+/* MapView not included as it is loaded lazily */
+
+const views = {
+  BeaconList,
+  ClockDisplayList,
+  ConnectionList,
+  DockList,
+  FeaturePanel,
+  LayerList,
+  LogPanel,
+  MessagesPanelView,
+  MissionOverviewPanel,
+  SavedLocationList,
+  UAVDetailsPanel,
+  UAVList,
+  ThreeDTopLevelView,
+};
+
+export default views;

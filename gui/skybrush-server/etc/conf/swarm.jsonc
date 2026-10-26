@@ -1,0 +1,18 @@
+// Configuration file for the swarm fleet-management backend (a stripped,
+// re-purposed fork of Skybrush Server with the drone-light-show extensions
+// removed). This boots a clean server with no UAV driver wired up yet --
+// the extension that bridges to this project's own main.py/swarm.py UDP
+// protocol is a later addition (see the project plan), not included here.
+//
+// The file is essentially a JSON file, but C-style comments are allowed, and
+// lines starting with a hash are ignored.
+
+{
+  "EXTENSIONS": {
+    // Make the server listen on all interfaces so it can be connected to
+    // from the GCS operator machine running the "live" frontend
+    "http_server": {
+      "host": ""
+    }
+  }
+}
